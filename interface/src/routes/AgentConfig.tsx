@@ -65,7 +65,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 	// Sync activeSection with URL search param
 	useEffect(() => {
 		if (search.tab) {
-			const validSections: SectionId[] = ["soul", "identity", "user", "routing", "tuning", "compaction", "cortex", "coalesce", "memory", "browser", "channel", "sandbox"];
+			const validSections = SECTIONS.map((section) => section.id);
 			if (validSections.includes(search.tab as SectionId)) {
 				setActiveSection(search.tab as SectionId);
 			}

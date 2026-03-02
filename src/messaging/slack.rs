@@ -268,9 +268,41 @@ async fn handle_message_event(
         .as_ref()
         .map(|text| text.contains(&format!("<@{}>", adapter_state.bot_user_id)))
         .unwrap_or(false);
+    let replied_to_bot = if let Some(thread_ts) = msg_event.origin.thread_ts.as_ref() {
+        // For threaded replies, treat as explicit invoke only when the thread
+        // root message belongs to this bot.
+        if thread_ts.0 != ts {
+            let req = SlackApiConversationsRepliesRequest::new(
+                SlackChannelId(channel_id.clone()),
+                thread_ts.clone(),
+            )
+            .with_limit(1);
+            match client
+                .open_session(&SlackApiToken::new(SlackApiTokenValue(
+                    adapter_state.bot_token.clone(),
+                )))
+                .conversations_replies(&req)
+                .await
+            {
+                Ok(response) => response
+                    .messages
+                    .first()
+                    .and_then(|message| message.sender.user.as_ref())
+                    .is_some_and(|user| user.0 == adapter_state.bot_user_id),
+                Err(error) => {
+                    tracing::debug!(%error, "failed to resolve slack thread parent for reply invoke");
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
     metadata.insert(
         "slack_mentions_or_replies_to_bot".into(),
-        serde_json::Value::Bool(mentioned_bot),
+        serde_json::Value::Bool(mentioned_bot || replied_to_bot),
     );
 
     send_inbound(

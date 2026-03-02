@@ -354,6 +354,11 @@ impl Channel {
                 .get("slack_mentions_or_replies_to_bot")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
+            "twitch" => message
+                .metadata
+                .get("twitch_mentions_or_replies_to_bot")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             _ => false,
         };
         let invoked_by_reply = match message.source.as_str() {
@@ -730,6 +735,17 @@ impl Channel {
             return false;
         }
         if config.multi_user_only && self.is_dm() {
+            return false;
+        }
+        // Built-in slash commands should execute immediately and never be batched.
+        let looks_like_command = match &message.content {
+            crate::MessageContent::Text(text) => text.trim_start().starts_with('/'),
+            crate::MessageContent::Media { text, .. } => text
+                .as_deref()
+                .is_some_and(|value| value.trim_start().starts_with('/')),
+            crate::MessageContent::Interaction { .. } => false,
+        };
+        if looks_like_command {
             return false;
         }
         true

@@ -439,6 +439,13 @@ impl Tool for ReplyTool {
             .map(|name| name.trim())
             .filter(|name| !name.is_empty());
 
+        let cards_requested = args.cards.as_ref().is_some_and(|cards| !cards.is_empty());
+        let interactive_requested = args
+            .interactive_elements
+            .as_ref()
+            .is_some_and(|elements| !elements.is_empty());
+        let poll_requested = args.poll.is_some();
+
         let response = if let Some(name) = thread_name {
             // Cap thread names at 100 characters (Discord limit)
             let thread_name = if name.len() > 100 {
@@ -450,19 +457,33 @@ impl Tool for ReplyTool {
                 thread_name,
                 text: converted_content.clone(),
             }
-        } else if args.cards.is_some() || args.interactive_elements.is_some() || args.poll.is_some()
-        {
-            if source == "telegram" || source == "discord" {
-                // Force plain text on adapters where rich payloads can fail silently.
-                OutboundResponse::Text(converted_content.clone())
-            } else {
-                OutboundResponse::RichMessage {
-                    text: converted_content.clone(),
-                    blocks: vec![], // No block generation for now; Slack adapters will fall back to text
-                    cards: args.cards.unwrap_or_default(),
-                    interactive_elements: args.interactive_elements.unwrap_or_default(),
-                    poll: args.poll,
-                }
+        } else if cards_requested || interactive_requested || poll_requested {
+            let supports_cards = matches!(source, "discord" | "slack");
+            let supports_interactive = matches!(source, "discord" | "slack");
+            let supports_poll = matches!(source, "discord" | "telegram");
+            let mut unsupported = Vec::new();
+            if cards_requested && !supports_cards {
+                unsupported.push("cards");
+            }
+            if interactive_requested && !supports_interactive {
+                unsupported.push("interactive_elements");
+            }
+            if poll_requested && !supports_poll {
+                unsupported.push("poll");
+            }
+            if !unsupported.is_empty() {
+                return Err(ReplyError(format!(
+                    "unsupported rich payload for source '{source}': requested unsupported fields [{}]",
+                    unsupported.join(", ")
+                )));
+            }
+
+            OutboundResponse::RichMessage {
+                text: converted_content.clone(),
+                blocks: vec![], // No block generation for now; Slack adapters will fall back to text
+                cards: args.cards.unwrap_or_default(),
+                interactive_elements: args.interactive_elements.unwrap_or_default(),
+                poll: args.poll,
             }
         } else {
             OutboundResponse::Text(converted_content.clone())
