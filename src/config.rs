@@ -3124,6 +3124,22 @@ fn resolve_listen_only_mode(
     configured.or(persisted).unwrap_or(default)
 }
 
+fn resolve_channel_runtime_merge(
+    resolved: ChannelConfig,
+    configured_listen_only: Option<bool>,
+    persisted: ChannelConfig,
+    default: ChannelConfig,
+) -> ChannelConfig {
+    let _ = resolved;
+    ChannelConfig {
+        listen_only_mode: resolve_listen_only_mode(
+            configured_listen_only,
+            Some(persisted.listen_only_mode),
+            default.listen_only_mode,
+        ),
+    }
+}
+
 fn default_enabled() -> bool {
     true
 }
@@ -5847,13 +5863,12 @@ impl RuntimeConfig {
         let default_channel = config.defaults.channel;
         let configured_listen_only = agent.channel.map(|channel| channel.listen_only_mode);
         self.channel_config.rcu(move |current| {
-            let mut next = resolved_channel;
-            next.listen_only_mode = resolve_listen_only_mode(
+            Arc::new(resolve_channel_runtime_merge(
+                resolved_channel,
                 configured_listen_only,
-                Some(current.listen_only_mode),
-                default_channel.listen_only_mode,
-            );
-            Arc::new(next)
+                **current,
+                default_channel,
+            ))
         });
         self.mcp.store(Arc::new(new_mcp.clone()));
         self.history_backfill_count
