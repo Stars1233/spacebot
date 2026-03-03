@@ -2628,6 +2628,52 @@ pub struct WebhookConfig {
 
 // -- TOML deserialization types --
 
+/// Known top-level keys in config.toml (must match `TomlConfig` field names).
+const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
+    "llm",
+    "defaults",
+    "agents",
+    "links",
+    "groups",
+    "humans",
+    "messaging",
+    "bindings",
+    "api",
+    "metrics",
+    "telemetry",
+];
+
+/// Pre-parse check that warns about unrecognised top-level keys in a config
+/// file.  Serde's default behaviour silently drops unknown fields, which leads
+/// to confusing "my setting does nothing" bugs (see issue #221).
+fn warn_unknown_config_keys(content: &str) {
+    let table: toml::Table = match content.parse() {
+        Ok(t) => t,
+        Err(_) => return, // the typed parse will report the real error
+    };
+
+    for key in table.keys() {
+        if KNOWN_TOP_LEVEL_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+
+        if key == "mcp_servers" || key == "mcp" {
+            tracing::warn!(
+                "config.toml contains top-level key `{key}` which is not recognised \
+                 and will be ignored. MCP servers should be defined under [defaults] \
+                 as [[defaults.mcp]] (or per-agent under [[agents.mcp]]). \
+                 See docs/design-docs/mcp.md for the correct format."
+            );
+        } else {
+            tracing::warn!(
+                "config.toml contains unknown top-level key `{key}` — \
+                 it will be silently ignored by the parser. Check for typos \
+                 or consult the configuration reference."
+            );
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct TomlConfig {
     #[serde(default)]
@@ -3744,6 +3790,8 @@ impl Config {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config from {}", path.display()))?;
 
+        warn_unknown_config_keys(&content);
+
         let toml_config: TomlConfig = toml::from_str(&content)
             .with_context(|| format!("failed to parse config from {}", path.display()))?;
 
@@ -4223,6 +4271,8 @@ impl Config {
     /// Validate a raw TOML string as a valid Spacebot config.
     /// Returns Ok(()) if the config is structurally valid, or an error describing what's wrong.
     pub fn validate_toml(content: &str) -> Result<()> {
+        warn_unknown_config_keys(content);
+
         let toml_config: TomlConfig =
             toml::from_str(content).context("failed to parse config TOML")?;
         // Run full conversion to catch semantic errors (env resolution, defaults, etc.)
@@ -8319,5 +8369,61 @@ guild_id = "123456"
             Some("support".into())
         );
         assert_eq!(normalize_adapter(Some("ops".into())), Some("ops".into()));
+    }
+
+    #[test]
+    fn warn_unknown_config_keys_no_panic() {
+        // Smoke test: the function should not panic for any input shape.
+        // Actual warning output goes through tracing (not asserted here).
+        let toml_with_mcp_servers = r#"
+[[mcp_servers]]
+name = "test"
+transport = "stdio"
+command = "/usr/bin/test"
+"#;
+        warn_unknown_config_keys(toml_with_mcp_servers);
+
+        // Top-level `mcp` should also be caught
+        let toml_with_mcp = r#"
+[[mcp]]
+name = "test"
+transport = "stdio"
+command = "/usr/bin/test"
+"#;
+        warn_unknown_config_keys(toml_with_mcp);
+
+        // Generic unknown key
+        let toml_with_unknown = r#"
+[foobar]
+something = true
+"#;
+        warn_unknown_config_keys(toml_with_unknown);
+
+        // Valid keys should not warn
+        let toml_valid = r#"
+[llm]
+[defaults]
+[messaging]
+[api]
+"#;
+        warn_unknown_config_keys(toml_valid);
+    }
+
+    #[test]
+    fn top_level_mcp_servers_silently_ignored_by_serde() {
+        // Demonstrates the root cause of issue #221: serde drops unknown fields.
+        // `[[mcp_servers]]` at the top level deserializes fine but the data is lost.
+        let toml = r#"
+[[agents]]
+id = "test-agent"
+
+[[mcp_servers]]
+name = "my-server"
+transport = "stdio"
+command = "/usr/bin/test"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("should parse without error");
+        // The mcp_servers data is silently dropped — verify it's not accessible
+        assert!(parsed.defaults.mcp.is_empty());
     }
 }
