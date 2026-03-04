@@ -170,16 +170,20 @@ pub const MAX_DIR_ENTRIES: usize = 500;
 /// Cuts at the last valid char boundary before `max_bytes` so we never split
 /// a multi-byte character. The truncation notice tells the LLM the original
 /// size and how to get the rest (pipe through head/tail or read with offset).
+fn truncate_at_char_boundary(value: &str, max_bytes: usize) -> usize {
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 pub fn truncate_output(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_string();
     }
 
-    // Find the last char boundary at or before max_bytes
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = truncate_at_char_boundary(value, max_bytes);
 
     let total = value.len();
     let truncated_bytes = total - end;
@@ -188,6 +192,30 @@ pub fn truncate_output(value: &str, max_bytes: usize) -> String {
          Use head/tail/offset to read specific sections]",
         &value[..end]
     )
+}
+
+/// Truncate to a byte limit and append `...`, preserving UTF-8 boundaries.
+///
+/// The returned string will never exceed `max_bytes`. If there's not enough
+/// room for both content and "...", only the content is returned (truncated
+/// to fit within `max_bytes`).
+pub fn truncate_utf8_ellipsis(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+
+    // Try to leave room for "..." (3 bytes)
+    let available = max_bytes.saturating_sub(3);
+    let end = truncate_at_char_boundary(value, available);
+
+    // If we have room for "...", append it; otherwise just return truncated content
+    if end > 0 && end + 3 <= max_bytes {
+        format!("{}...", &value[..end])
+    } else {
+        // Not enough room for "...", return as much as fits
+        let end = truncate_at_char_boundary(value, max_bytes);
+        value[..end].to_string()
+    }
 }
 
 /// Returns true when text looks like structured/tool payloads that should never
@@ -576,5 +604,16 @@ mod tests {
             "I can skip that if you want."
         ));
         assert!(!should_block_user_visible_text("- first\n- second"));
+    }
+
+    #[test]
+    fn truncate_helpers_preserve_utf8_boundaries() {
+        let text = "🙂🙂🙂";
+        // For max_bytes=5: can fit "🙂" (4 bytes) but not "🙂..." (7 bytes)
+        // So we get just "🙂" without ellipsis since it wouldn't fit
+        assert_eq!(truncate_utf8_ellipsis(text, 5), "🙂");
+        // For larger max_bytes=10: can fit "🙂..." (7 bytes)
+        assert_eq!(truncate_utf8_ellipsis(text, 10), "🙂...");
+        assert!(truncate_output(text, 5).starts_with("🙂"));
     }
 }
