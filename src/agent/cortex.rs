@@ -259,6 +259,9 @@ struct WorkerTracker {
     worker_type: String,
     started_at: Instant,
     last_activity_at: Instant,
+    /// When true the worker is idle (waiting for follow-up input) and should
+    /// NOT be killed by the supervisor timeout.
+    is_idle: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -312,13 +315,22 @@ impl HealthRuntimeState {
                 worker_type,
                 started_at: now,
                 last_activity_at: now,
+                is_idle: false,
             },
         );
+    }
+
+    fn track_worker_idle(&mut self, worker_id: WorkerId) {
+        if let Some(tracker) = self.worker_trackers.get_mut(&worker_id) {
+            tracker.is_idle = true;
+        }
     }
 
     fn track_worker_activity(&mut self, worker_id: WorkerId) {
         if let Some(tracker) = self.worker_trackers.get_mut(&worker_id) {
             tracker.last_activity_at = Instant::now();
+            // Any activity means the worker is no longer idle.
+            tracker.is_idle = false;
         }
     }
 
@@ -830,6 +842,7 @@ impl Cortex {
             ProcessEvent::WorkerComplete {
                 worker_id, success, ..
             } => state.track_worker_complete(*worker_id, *success, threshold),
+            ProcessEvent::WorkerIdle { worker_id, .. } => state.track_worker_idle(*worker_id),
             ProcessEvent::WorkerStatus { worker_id, .. } => {
                 state.track_worker_activity(*worker_id);
             }
@@ -895,7 +908,8 @@ impl Cortex {
                     .worker_trackers
                     .values()
                     .filter(|tracker| {
-                        now.duration_since(tracker.last_activity_at) >= worker_timeout
+                        !tracker.is_idle
+                            && now.duration_since(tracker.last_activity_at) >= worker_timeout
                     })
                     .cloned()
                     .collect()
@@ -4037,6 +4051,7 @@ mod tests {
             worker_type: "builtin".to_string(),
             started_at: shared_start,
             last_activity_at: shared_start,
+            is_idle: false,
         };
         let worker_b = WorkerTracker {
             worker_id: uuid::Uuid::parse_str("00000000-0000-0000-0000-00000000000b")
@@ -4045,6 +4060,7 @@ mod tests {
             worker_type: "builtin".to_string(),
             started_at: shared_start,
             last_activity_at: shared_start,
+            is_idle: false,
         };
         let branch_oldest = BranchTracker {
             branch_id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
