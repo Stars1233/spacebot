@@ -94,7 +94,17 @@ cp "${EMBED_SRC}/index-embed.html"     "${APP_DIR}/index-embed.html"
 # 3. Install dependencies
 # ---------------------------------------------------------------------------
 echo "[opencode-embed] Installing dependencies..."
-(cd "${CACHE_DIR}" && bun install --frozen-lockfile 2>/dev/null || bun install)
+if [ "${CI:-}" = "true" ]; then
+  # In CI the lockfile must be up-to-date; fail loudly on drift.
+  (cd "${CACHE_DIR}" && bun install --frozen-lockfile) || {
+    echo "[opencode-embed] ERROR: bun install --frozen-lockfile failed."
+    echo "  The lockfile is out of sync. Run 'bun install' locally and commit the updated lockfile."
+    exit 1
+  }
+else
+  # Locally, try frozen first but fall back to a regular install.
+  (cd "${CACHE_DIR}" && bun install --frozen-lockfile 2>/dev/null || bun install)
+fi
 
 # ---------------------------------------------------------------------------
 # 4. Build the embed bundle
