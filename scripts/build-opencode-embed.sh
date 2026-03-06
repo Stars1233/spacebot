@@ -26,6 +26,41 @@ EMBED_SRC="${REPO_ROOT}/interface/opencode-embed-src"
 OUTPUT_DIR="${REPO_ROOT}/interface/public/opencode-embed"
 
 # ---------------------------------------------------------------------------
+# 0. Pre-flight: verify Node 22+ is available
+# ---------------------------------------------------------------------------
+# Try fnm first (non-interactive shells don't source shell init files)
+if command -v fnm &>/dev/null; then
+  eval "$(fnm env)" 2>/dev/null || true
+  fnm use v24.14.0 2>/dev/null || true
+fi
+
+if ! command -v node &>/dev/null; then
+  echo "[opencode-embed] ERROR: node not found."
+  echo ""
+  echo "  This build requires Node 22+. Install via fnm:"
+  echo "    curl -fsSL https://fnm.vercel.app/install | bash"
+  echo "    fnm install v24.14.0"
+  echo ""
+  echo "  Then re-run:"
+  echo "    eval \"\$(fnm env)\" && fnm use v24.14.0 && ./scripts/build-opencode-embed.sh"
+  exit 1
+fi
+
+NODE_MAJOR="$(node -v | sed 's/^v//' | cut -d. -f1)"
+if [ "${NODE_MAJOR}" -lt 22 ]; then
+  echo "[opencode-embed] ERROR: Node 22+ required (got $(node -v))."
+  echo ""
+  echo "  If you use fnm:"
+  echo "    fnm install v24.14.0 && fnm use v24.14.0"
+  echo ""
+  echo "  Then re-run:"
+  echo "    eval \"\$(fnm env)\" && fnm use v24.14.0 && ./scripts/build-opencode-embed.sh"
+  exit 1
+fi
+
+echo "[opencode-embed] Using node $(node -v)"
+
+# ---------------------------------------------------------------------------
 # 1. Clone or fetch OpenCode at the pinned commit
 # ---------------------------------------------------------------------------
 if [ -d "${CACHE_DIR}/.git" ]; then
@@ -61,30 +96,13 @@ echo "[opencode-embed] Installing dependencies..."
 (cd "${CACHE_DIR}" && bun install --frozen-lockfile 2>/dev/null || bun install)
 
 # ---------------------------------------------------------------------------
-# 4. Switch to Node 24+ if fnm is available (needed for Vite build)
-# ---------------------------------------------------------------------------
-if command -v fnm &>/dev/null; then
-  eval "$(fnm env)"
-  fnm use v24.14.0 2>/dev/null || fnm install v24.14.0
-  fnm use v24.14.0
-fi
-
-# Verify node version
-NODE_MAJOR="$(node -v | sed 's/^v//' | cut -d. -f1)"
-if [ "${NODE_MAJOR}" -lt 22 ]; then
-  echo "[opencode-embed] ERROR: Node 22+ required for Vite build (got $(node -v))"
-  echo "  Install fnm and run: fnm install v24.14.0"
-  exit 1
-fi
-
-# ---------------------------------------------------------------------------
-# 5. Build the embed bundle
+# 4. Build the embed bundle
 # ---------------------------------------------------------------------------
 echo "[opencode-embed] Building embed bundle..."
 (cd "${APP_DIR}" && ./node_modules/.bin/vite build --config vite.config.embed.ts)
 
 # ---------------------------------------------------------------------------
-# 6. Copy output to interface/public/opencode-embed/
+# 5. Copy output to interface/public/opencode-embed/
 # ---------------------------------------------------------------------------
 echo "[opencode-embed] Copying build output..."
 rm -rf "${OUTPUT_DIR}"
