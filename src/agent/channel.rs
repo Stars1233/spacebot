@@ -2310,9 +2310,9 @@ impl Channel {
             ProcessEvent::WorkerInitialResult {
                 worker_id, result, ..
             } => {
-                // Interactive worker completed its initial task but stays alive
-                // for follow-ups. Deliver the result to the channel without
-                // removing the worker from the active set.
+                // Interactive worker completed a task (initial or follow-up)
+                // but stays alive for more input. Deliver the result to the
+                // channel without removing the worker from the active set.
                 self.pending_results.push(PendingResult {
                     process_type: "worker",
                     process_id: worker_id.to_string(),
@@ -2322,7 +2322,7 @@ impl Channel {
                 should_retrigger = true;
                 tracing::info!(
                     worker_id = %worker_id,
-                    "interactive worker initial result queued for retrigger"
+                    "interactive worker result queued for retrigger"
                 );
             }
             _ => {}

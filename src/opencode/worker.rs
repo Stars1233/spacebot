@@ -278,6 +278,19 @@ impl OpenCodeWorker {
                     .await
                 {
                     Ok(_) => {
+                        // Emit follow-up result so the channel can retrigger
+                        // and relay this to the user — same as initial result.
+                        let follow_up_text = event_state.last_text.clone();
+                        if !follow_up_text.is_empty() {
+                            let scrubbed = self.scrub_text(&follow_up_text);
+                            let scrubbed = crate::secrets::scrub::scrub_leaks(&scrubbed);
+                            let _ = self.event_tx.send(ProcessEvent::WorkerInitialResult {
+                                agent_id: self.agent_id.clone(),
+                                worker_id: self.id,
+                                channel_id: self.channel_id.clone(),
+                                result: scrubbed,
+                            });
+                        }
                         self.send_status("waiting for follow-up");
                         self.send_idle();
                     }

@@ -346,12 +346,12 @@ impl Worker {
                     .clone()
                     .with_tool_nudge_policy(ToolNudgePolicy::Disabled);
 
-                let follow_up_result: std::result::Result<(), String> = loop {
+                let follow_up_result: std::result::Result<String, String> = loop {
                     match follow_up_hook
                         .prompt_once(&agent, &mut history, &follow_up_prompt)
                         .await
                     {
-                        Ok(_response) => break Ok(()),
+                        Ok(response) => break Ok(response),
                         Err(error) if is_context_overflow_error(&error.to_string()) => {
                             follow_up_overflow_retries += 1;
                             if follow_up_overflow_retries > MAX_OVERFLOW_RETRIES {
@@ -384,11 +384,36 @@ impl Worker {
                     }
                 };
 
-                if let Err(failure_reason) = follow_up_result {
-                    self.state = WorkerState::Failed;
-                    self.hook.send_status("failed");
-                    follow_up_failure = Some(failure_reason);
-                    break;
+                match follow_up_result {
+                    Ok(response) => {
+                        // Emit follow-up result so the channel can retrigger
+                        // and relay this to the user — same as initial result.
+                        if !response.is_empty() {
+                            let scrubbed = if let Some(store) =
+                                self.deps.runtime_config.secrets.load().as_ref().as_ref()
+                            {
+                                crate::secrets::scrub::scrub_with_store(&response, store)
+                            } else {
+                                response
+                            };
+                            let scrubbed = crate::secrets::scrub::scrub_leaks(&scrubbed);
+                            self.deps
+                                .event_tx
+                                .send(crate::ProcessEvent::WorkerInitialResult {
+                                    agent_id: self.deps.agent_id.clone(),
+                                    worker_id: self.id,
+                                    channel_id: self.channel_id.clone(),
+                                    result: scrubbed,
+                                })
+                                .ok();
+                        }
+                    }
+                    Err(failure_reason) => {
+                        self.state = WorkerState::Failed;
+                        self.hook.send_status("failed");
+                        follow_up_failure = Some(failure_reason);
+                        break;
+                    }
                 }
 
                 self.state = WorkerState::WaitingForInput;
