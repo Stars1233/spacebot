@@ -1573,6 +1573,24 @@ impl Channel {
                     content: OneOrMany::one(rig::message::AssistantContent::text(record)),
                 });
             }
+
+            // Mark the completed items as relayed in the status block so their
+            // full result summaries stop appearing on subsequent turns. This
+            // prevents the LLM from re-summarising stale worker/branch results.
+            if replied
+                && let Some(ids) = message
+                    .metadata
+                    .get("retrigger_process_ids")
+                    .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+            {
+                let mut status = self.state.status_block.write().await;
+                status.mark_relayed(&ids);
+                tracing::debug!(
+                    channel_id = %self.id,
+                    count = ids.len(),
+                    "marked retrigger results as relayed in status block"
+                );
+            }
         }
 
         // Check context size and trigger compaction if needed
@@ -2457,10 +2475,22 @@ impl Channel {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Collect the process IDs so we can mark them as relayed in the
+        // status block after the retrigger turn completes successfully.
+        let retrigger_process_ids: Vec<String> = self
+            .pending_results
+            .iter()
+            .map(|r| r.process_id.clone())
+            .collect();
+
         let mut metadata = self.pending_retrigger_metadata.clone();
         metadata.insert(
             "retrigger_result_summary".to_string(),
             serde_json::Value::String(result_summary),
+        );
+        metadata.insert(
+            "retrigger_process_ids".to_string(),
+            serde_json::json!(retrigger_process_ids),
         );
 
         let synthetic = InboundMessage {
