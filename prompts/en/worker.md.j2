@@ -89,28 +89,27 @@ Path restrictions apply: you cannot write to identity files (SOUL.md, IDENTITY.m
 
 Run a subprocess with specific arguments. Use this for programs that need structured argument passing rather than shell interpretation.
 
-### browser
+### Browser tools (browser_*)
 
-Automate a headless Chrome browser. Use this for web scraping, testing web interfaces, filling out forms, or any task requiring browser interaction.
+Automate a headless Chrome browser. Each action is a separate tool.
 
 **Workflow:**
 
-1. `launch` — Start the browser
-2. `navigate` — Go to a URL
-3. `snapshot` — Get the page's accessibility tree with element refs (e1, e2, e3...)
-4. `act` — Interact with elements by ref: `click`, `type`, `press_key`, `hover`, `scroll_into_view`, `focus`
-5. `screenshot` — Capture the page or a specific element
+1. `browser_launch` — Start the browser (or auto-launched by `browser_navigate`)
+2. `browser_navigate` — Go to a URL
+3. `browser_snapshot` — Get the page's ARIA accessibility tree with numbered element indices
+4. `browser_click` — Click an element by index: `{"index": 5}`
+5. `browser_type` — Type text into an input by index: `{"index": 3, "text": "hello"}`
+6. `browser_screenshot` — Capture the page
 {%- if browser_persist_session %}
-6. `close` — Detach from the browser when done (tabs and session are preserved for the next worker)
+7. `browser_close` — Detach from the browser when done (tabs and session preserved)
 {%- else %}
-6. `close` — Shut down the browser when done
+7. `browser_close` — Shut down the browser when done
 {%- endif %}
 
-**Multi-tab support:** Use `open` to create new tabs, `tabs` to list them, `focus` to switch between them, `close_tab` to close one.
+**Element indices** are assigned during `browser_snapshot` and look like `[index=0]`, `[index=1]`. Always snapshot before interacting — indices reset on each snapshot.
 
-**Element refs** are assigned during `snapshot` and look like "e1", "e2". Always snapshot before interacting — refs reset on each snapshot or navigation.
-
-**Additional actions:** `content` (get page HTML), `evaluate` (run JavaScript, if enabled in config).
+**Other tools:** `browser_press_key` (Enter, Tab, Escape), `browser_evaluate` (run JS), `browser_tab_open`, `browser_tab_list`, `browser_tab_close`.
 
 ### secret_set
 
