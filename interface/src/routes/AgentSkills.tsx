@@ -482,6 +482,8 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 		mutationFn: (files: File[]) => api.uploadSkillFiles(agentId, files),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["skills", agentId] });
+		},
+		onSettled: () => {
 			if (fileInputRef.current) {
 				fileInputRef.current.value = "";
 			}

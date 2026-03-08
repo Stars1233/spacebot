@@ -326,10 +326,18 @@ pub(super) async fn upload_skill(
 
     let mut all_installed = Vec::new();
 
-    while let Ok(Some(field)) = multipart.next_field().await {
+    while let Some(field) = multipart.next_field().await.map_err(|error| {
+        tracing::warn!(%error, "failed to read multipart field");
+        StatusCode::BAD_REQUEST
+    })? {
         let filename = field
             .file_name()
-            .map(|n| n.to_string())
+            .map(|n| {
+                std::path::Path::new(n)
+                    .file_name()
+                    .map(|base| base.to_string_lossy().to_string())
+                    .unwrap_or_else(|| n.to_string())
+            })
             .unwrap_or_else(|| "upload.zip".to_string());
 
         let data = field.bytes().await.map_err(|error| {

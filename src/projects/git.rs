@@ -38,7 +38,7 @@ pub struct DiscoveredWorktree {
 pub async fn discover_repos(project_root: &Path) -> anyhow::Result<Vec<DiscoveredRepo>> {
     // Check if the project root itself is a git repo (single-repo project).
     let root_dot_git = project_root.join(".git");
-    if root_dot_git.exists() && root_dot_git.is_dir() {
+    if root_dot_git.exists() {
         let name = project_root
             .file_name()
             .and_then(|n| n.to_str())
@@ -111,11 +111,6 @@ pub async fn discover_repos(project_root: &Path) -> anyhow::Result<Vec<Discovere
 
     repos.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(repos)
-}
-
-/// Returns `true` if this is a single-repo project (root itself is the repo).
-pub fn is_single_repo_project(repos: &[DiscoveredRepo]) -> bool {
-    repos.len() == 1 && repos[0].relative_path == "."
 }
 
 /// List existing worktrees for a git repo.

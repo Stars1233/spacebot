@@ -191,19 +191,18 @@ async fn discover_and_register_worktrees(
         }
     };
 
-    let is_single_repo = repos.len() == 1 && repos[0].path == ".";
-
     for repo in &repos {
         let repo_abs_path = root.join(&repo.path);
         if !repo_abs_path.is_dir() {
             continue;
         }
+        let is_root_repo = repo.path == ".";
         match crate::projects::git::list_worktrees(&repo_abs_path).await {
             Ok(discovered) => {
                 for worktree in discovered {
                     // For single-repo projects, worktrees live in the parent
                     // directory. Compute the relative path accordingly.
-                    let (name, relative_path) = if is_single_repo {
+                    let (name, relative_path) = if is_root_repo {
                         let name = worktree
                             .path
                             .file_name()

@@ -247,8 +247,6 @@ impl ProjectManageTool {
         let mut repo_count = 0;
         let mut worktree_count = 0;
 
-        let is_single_repo = git::is_single_repo_project(&discovered);
-
         for repo_info in &discovered {
             let result = self
                 .project_store
@@ -267,6 +265,7 @@ impl ProjectManageTool {
                 repo_count += 1;
 
                 // Discover worktrees for this repo
+                let is_root_repo = repo_info.relative_path == ".";
                 let repo_abs_path = root.join(&repo_info.relative_path);
                 if let Ok(worktrees) = git::list_worktrees(&repo_abs_path).await {
                     for worktree_info in worktrees {
@@ -276,9 +275,9 @@ impl ProjectManageTool {
                             .map(|name| name.to_string_lossy().to_string())
                             .unwrap_or_else(|| worktree_info.branch.replace('/', "-"));
 
-                        // For single-repo projects, worktrees live in the parent
+                        // For root repos (path == "."), worktrees live in the parent
                         // directory. Store as `../name` relative to root.
-                        let relative_path = if is_single_repo {
+                        let relative_path = if is_root_repo {
                             let parent = root.parent();
                             parent
                                 .and_then(|p| worktree_info.path.strip_prefix(p).ok())
@@ -392,10 +391,9 @@ impl ProjectManageTool {
             .await
             .unwrap_or_default();
 
-        let is_single_repo = all_repos.len() == 1 && all_repos[0].path == ".";
-
         for repo in &all_repos {
             let repo_abs_path = root.join(&repo.path);
+            let is_root_repo = repo.path == ".";
             if let Ok(worktrees) = git::list_worktrees(&repo_abs_path).await {
                 let existing_worktrees = self
                     .project_store
@@ -420,7 +418,7 @@ impl ProjectManageTool {
                         .map(|name| name.to_string_lossy().to_string())
                         .unwrap_or_else(|| worktree_info.branch.replace('/', "-"));
 
-                    let relative_path = if is_single_repo {
+                    let relative_path = if is_root_repo {
                         let parent = root.parent();
                         parent
                             .and_then(|p| worktree_info.path.strip_prefix(p).ok())
