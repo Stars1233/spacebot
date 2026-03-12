@@ -162,18 +162,21 @@ impl ChannelState {
             return Err(format!("Worker {worker_id} not found"));
         }
 
-        // Drain the live transcript before aborting so we can persist it.
-        // The abort kills the worker future, so persist_transcript() inside the
-        // worker's run() method will never execute. We compensate here.
+        // Abort first so the worker stops producing new ToolStarted/ToolCompleted
+        // events, then drain whatever was accumulated. This avoids a race where
+        // events written between drain and abort would be lost.
+        if let Some(handle) = handle {
+            handle.abort();
+        }
+
+        // Now that the worker future is cancelled, drain the live transcript
+        // cache. persist_transcript() inside the worker's run() method will
+        // never execute after abort, so we compensate here.
         let live_steps = self
             .live_worker_transcripts
             .write()
             .await
             .remove(&worker_id.to_string());
-
-        if let Some(handle) = handle {
-            handle.abort();
-        }
 
         // Persist whatever transcript was accumulated from ToolStarted/ToolCompleted
         // events. This is a best-effort snapshot — it won't include the worker's
@@ -480,6 +483,13 @@ impl Channel {
         screenshot_dir: std::path::PathBuf,
         logs_dir: std::path::PathBuf,
         prompt_snapshot_store: Option<Arc<crate::agent::prompt_snapshot::PromptSnapshotStore>>,
+        live_worker_transcripts: Option<
+            Arc<
+                RwLock<
+                    HashMap<String, Vec<crate::conversation::worker_transcript::TranscriptStep>>,
+                >,
+            >,
+        >,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
         let hook = SpacebotHook::new(
@@ -519,7 +529,8 @@ impl Channel {
             screenshot_dir,
             logs_dir,
             prompt_snapshot_store,
-            live_worker_transcripts: Arc::new(RwLock::new(HashMap::new())),
+            live_worker_transcripts: live_worker_transcripts
+                .unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new()))),
         };
 
         // Each channel gets its own isolated tool server to avoid races between

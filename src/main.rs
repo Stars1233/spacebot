@@ -1765,16 +1765,13 @@ async fn run(
                         agent.config.screenshot_dir(),
                         agent.config.logs_dir(),
                         snapshot_store,
+                        Some(api_state.live_worker_transcripts.clone()),
                     );
                     let channel_registration_id = agent
                         .deps
                         .process_control_registry
                         .register_channel(channel.id.clone(), channel.control_handle().downgrade())
                         .await;
-                    // Share the live transcript cache so cancelled workers can
-                    // persist their accumulated transcript before abort.
-                    channel.state.live_worker_transcripts =
-                        api_state.live_worker_transcripts.clone();
                     api_state
                         .register_channel_status(
                             conversation_id.clone(),
@@ -2056,17 +2053,13 @@ async fn run(
                         agent.config.screenshot_dir(),
                         agent.config.logs_dir(),
                         snapshot_store,
+                        Some(api_state.live_worker_transcripts.clone()),
                     );
                     let channel_registration_id = agent
                         .deps
                         .process_control_registry
                         .register_channel(channel.id.clone(), channel.control_handle().downgrade())
                         .await;
-
-                    // Share the live transcript cache so cancelled workers can
-                    // persist their accumulated transcript before abort.
-                    channel.state.live_worker_transcripts =
-                        api_state.live_worker_transcripts.clone();
 
                     // Register the channel's status block with the API for snapshot queries
                     api_state.register_channel_status(
