@@ -992,4 +992,87 @@ mod tests {
         assert_eq!(truncate_utf8_ellipsis(text, 10), "🙂...");
         assert!(truncate_output(text, 5).starts_with("🙂"));
     }
+
+    #[test]
+    fn truncate_cyrillic_does_not_panic() {
+        // Cyrillic chars are 2 bytes each in UTF-8
+        let text = "Привет, мир!"; // "Hello, world!" in Russian
+        // Cutting at byte 5 would land inside 'и' (bytes 4..5) - this must not panic
+        let result = truncate_utf8_ellipsis(text, 5);
+        assert!(!result.is_empty());
+        // "П" (2 bytes) + "..." (3 bytes) = 5, fits exactly
+        assert_eq!(result, "П...");
+
+        let result = truncate_utf8_ellipsis(text, 10);
+        assert!(!result.is_empty());
+        // Should truncate to a valid char boundary and append "..."
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn truncate_cjk_does_not_panic() {
+        // CJK chars are 3 bytes each in UTF-8
+        let text = "你好世界测试"; // "Hello world test" in Chinese
+        // Cutting at byte 4 would land inside '好' (bytes 3..5)
+        let result = truncate_utf8_ellipsis(text, 4);
+        assert_eq!(result, "你"); // only 3 bytes fit, no room for "..."
+
+        let result = truncate_utf8_ellipsis(text, 10);
+        assert!(!result.is_empty());
+        // 2 CJK chars (6 bytes) + "..." (3 bytes) = 9 bytes fits in 10
+        assert_eq!(result, "你好...");
+    }
+
+    #[test]
+    fn truncate_emoji_does_not_panic() {
+        // Emoji are 4 bytes each in UTF-8
+        let text = "Hello 😀🎉🚀 World";
+        let result = truncate_utf8_ellipsis(text, 10);
+        assert!(!result.is_empty());
+        // "Hello " (6 bytes) + "😀" won't fit with "..." in 10 bytes
+        // "Hello " (6 bytes) + "..." (3 bytes) = 9 bytes fits
+        assert_eq!(result, "Hello ...");
+
+        // Larger budget
+        let result = truncate_utf8_ellipsis(text, 15);
+        assert!(!result.is_empty());
+        assert!(result.ends_with("..."));
+    }
+
+    #[test]
+    fn truncate_mixed_multibyte_content() {
+        // Mix of ASCII, Cyrillic (2-byte), CJK (3-byte), and emoji (4-byte)
+        let text = "Hi Привет 你好 😀";
+        let result = truncate_utf8_ellipsis(text, 20);
+        assert!(!result.is_empty());
+        assert!(result.ends_with("..."));
+        // Verify it's valid UTF-8 by iterating chars
+        assert!(result.chars().count() > 0);
+    }
+
+    #[test]
+    fn truncate_output_multibyte_does_not_panic() {
+        let cyrillic = "Привет, мир! Это тестовая строка для проверки.";
+        let result = truncate_output(cyrillic, 15);
+        assert!(!result.is_empty());
+
+        let cjk = "你好世界，这是一个测试字符串。";
+        let result = truncate_output(cjk, 10);
+        assert!(!result.is_empty());
+
+        let emoji = "🎉🚀😀🌍💻🔥";
+        let result = truncate_output(emoji, 6);
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn truncate_at_exact_char_boundary_works() {
+        let text = "абв"; // 3 Cyrillic chars, 6 bytes total
+        // Exactly at a char boundary (4 bytes = 2 chars)
+        let result = truncate_utf8_ellipsis(text, 6);
+        assert_eq!(result, "абв"); // fits entirely
+
+        let result = truncate_utf8_ellipsis(text, 7);
+        assert_eq!(result, "абв"); // also fits, no truncation needed
+    }
 }
