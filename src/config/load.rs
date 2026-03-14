@@ -2232,25 +2232,25 @@ impl Config {
                 let instances = mm
                     .instances
                     .into_iter()
-                    .filter_map(|instance| {
+                    .map(|instance| {
                         let token = instance.token.as_deref().and_then(resolve_env_value);
                         let base_url = instance.base_url.as_deref().and_then(resolve_env_value);
-                        if token.is_none() || base_url.is_none() {
+                        let has_credentials = token.is_some() && base_url.is_some();
+                        if instance.enabled && !has_credentials {
                             tracing::warn!(
-                                name = %instance.name,
-                                "skipping mattermost instance with missing credentials"
+                                adapter = %instance.name,
+                                "mattermost instance is enabled but credentials are missing/unresolvable — disabling"
                             );
-                            return None;
                         }
-                        Some(MattermostInstanceConfig {
+                        MattermostInstanceConfig {
                             name: instance.name,
-                            enabled: instance.enabled,
+                            enabled: instance.enabled && has_credentials,
                             base_url: base_url.unwrap_or_default(),
                             token: token.unwrap_or_default(),
                             team_id: instance.team_id,
                             dm_allowed_users: instance.dm_allowed_users,
                             max_attachment_bytes: instance.max_attachment_bytes,
-                        })
+                        }
                     })
                     .collect::<Vec<_>>();
 

@@ -39,6 +39,7 @@ pub struct MattermostAdapter {
     bot_username: OnceCell<Arc<str>>,
     user_identity_cache: Arc<RwLock<HashMap<String, String>>>,
     channel_name_cache: Arc<RwLock<HashMap<String, String>>>,
+    dm_channel_cache: Arc<RwLock<HashMap<String, String>>>,
     active_messages: Arc<RwLock<HashMap<String, ActiveStream>>>,
     typing_tasks: Arc<RwLock<HashMap<String, tokio::task::JoinHandle<()>>>>,
     shutdown_tx: Arc<RwLock<Option<mpsc::Sender<()>>>>,
@@ -74,8 +75,13 @@ impl MattermostAdapter {
         max_attachment_bytes: usize,
         permissions: Arc<ArcSwap<MattermostPermissions>>,
     ) -> anyhow::Result<Self> {
-        let base_url =
-            Url::parse(base_url).context("invalid mattermost base_url")?;
+        let base_url = Url::parse(base_url).context("invalid mattermost base_url")?;
+        if base_url.path() != "/" || base_url.query().is_some() || base_url.fragment().is_some() {
+            return Err(anyhow::anyhow!(
+                "mattermost base_url must be an origin URL without path/query/fragment (got: {})",
+                base_url
+            ).into());
+        }
 
         let client = Client::builder()
             .timeout(HTTP_TIMEOUT)
@@ -95,6 +101,7 @@ impl MattermostAdapter {
             bot_username: OnceCell::new(),
             user_identity_cache: Arc::new(RwLock::new(HashMap::new())),
             channel_name_cache: Arc::new(RwLock::new(HashMap::new())),
+            dm_channel_cache: Arc::new(RwLock::new(HashMap::new())),
             active_messages: Arc::new(RwLock::new(HashMap::new())),
             typing_tasks: Arc::new(RwLock::new(HashMap::new())),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -152,6 +159,7 @@ impl MattermostAdapter {
     }
 
     async fn start_typing(&self, channel_id: &str) {
+        self.stop_typing(channel_id).await;
         let Some(user_id) = self.bot_user_id.get().cloned() else {
             return;
         };
@@ -293,6 +301,43 @@ impl MattermostAdapter {
             .context("failed to parse posts response")
             .map_err(Into::into)
     }
+
+    async fn get_or_create_dm_channel(&self, user_id: &str) -> crate::Result<String> {
+        if let Some(channel_id) = self.dm_channel_cache.read().await.get(user_id).cloned() {
+            return Ok(channel_id);
+        }
+        let bot_user_id = self
+            .bot_user_id
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("bot_user_id not initialized"))?
+            .as_ref()
+            .to_string();
+        let response = self
+            .client
+            .post(self.api_url("/channels/direct"))
+            .bearer_auth(self.token.as_ref())
+            .json(&serde_json::json!([bot_user_id, user_id]))
+            .send()
+            .await
+            .context("failed to create DM channel")?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "mattermost POST /channels/direct failed with status {}: {body}",
+                status.as_u16()
+            ).into());
+        }
+        let channel: MattermostChannel = response
+            .json()
+            .await
+            .context("failed to parse DM channel response")?;
+        self.dm_channel_cache
+            .write()
+            .await
+            .insert(user_id.to_string(), channel.id.clone());
+        Ok(channel.id)
+    }
 }
 
 impl Messaging for MattermostAdapter {
@@ -305,13 +350,22 @@ impl Messaging for MattermostAdapter {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
         *self.shutdown_tx.write().await = Some(shutdown_tx);
 
-        let me: MattermostUser = self
+        let me_response = self
             .client
             .get(self.api_url("/users/me"))
             .bearer_auth(self.token.as_ref())
             .send()
             .await
-            .context("failed to get bot user")?
+            .context("failed to get bot user")?;
+        let me_status = me_response.status();
+        if !me_status.is_success() {
+            let body = me_response.text().await.unwrap_or_default();
+            return Err(anyhow::anyhow!(
+                "mattermost /users/me failed with status {}: {body}",
+                me_status.as_u16()
+            ).into());
+        }
+        let me: MattermostUser = me_response
             .json()
             .await
             .context("failed to parse user response")?;
@@ -519,7 +573,13 @@ impl Messaging for MattermostAdapter {
                 let root_id = message
                     .metadata
                     .get("mattermost_root_id")
-                    .and_then(|v| v.as_str());
+                    .and_then(|v| v.as_str())
+                    .or_else(|| {
+                        message
+                            .metadata
+                            .get(crate::metadata_keys::REPLY_TO_MESSAGE_ID)
+                            .and_then(|v| v.as_str())
+                    });
                 self.start_typing(channel_id).await;
                 // Create a placeholder post with a zero-width space.
                 let post = self.create_post(channel_id, "\u{200B}", root_id).await?;
@@ -560,10 +620,19 @@ impl Messaging for MattermostAdapter {
             OutboundResponse::StreamEnd => {
                 self.stop_typing(channel_id).await;
                 if let Some(active) = self.active_messages.write().await.remove(&message.id) {
-                    if let Err(error) =
-                        self.edit_post(&active.post_id, &active.accumulated_text).await
-                    {
-                        tracing::warn!(%error, "failed to finalize streaming message");
+                    let chunks = split_message(&active.accumulated_text, MAX_MESSAGE_LENGTH);
+                    let mut first = true;
+                    for chunk in chunks {
+                        if first {
+                            first = false;
+                            if let Err(error) = self.edit_post(&active.post_id, &chunk).await {
+                                tracing::warn!(%error, "failed to finalize streaming message");
+                            }
+                        } else {
+                            if let Err(error) = self.create_post(channel_id, &chunk, None).await {
+                                tracing::warn!(%error, "failed to create overflow chunk for streaming message");
+                            }
+                        }
                     }
                 }
             }
@@ -583,8 +652,9 @@ impl Messaging for MattermostAdapter {
                 let bot_user_id = self
                     .bot_user_id
                     .get()
-                    .map(|s| s.as_ref().to_string())
-                    .unwrap_or_default();
+                    .ok_or_else(|| anyhow::anyhow!("bot_user_id not initialized; call start() first"))?
+                    .as_ref()
+                    .to_string();
 
                 let response = self
                     .client
@@ -656,7 +726,7 @@ impl Messaging for MattermostAdapter {
 
                 let file_ids: Vec<_> =
                     upload.file_infos.iter().map(|f| f.id.as_str()).collect();
-                self.client
+                let post_response = self.client
                     .post(self.api_url("/posts"))
                     .bearer_auth(self.token.as_ref())
                     .json(&serde_json::json!({
@@ -667,6 +737,14 @@ impl Messaging for MattermostAdapter {
                     .send()
                     .await
                     .context("failed to create post with file")?;
+                let post_status = post_response.status();
+                if !post_status.is_success() {
+                    let body = post_response.text().await.unwrap_or_default();
+                    return Err(anyhow::anyhow!(
+                        "mattermost POST /posts (file) failed with status {}: {body}",
+                        post_status.as_u16()
+                    ).into());
+                }
             }
 
             _ => {
@@ -767,7 +845,9 @@ impl Messaging for MattermostAdapter {
             handle.abort();
         }
 
-        self.typing_tasks.write().await.clear();
+        for (_, handle) in self.typing_tasks.write().await.drain() {
+            handle.abort();
+        }
         self.active_messages.write().await.clear();
 
         tracing::info!(adapter = %self.runtime_key, "mattermost adapter shut down");
@@ -775,6 +855,15 @@ impl Messaging for MattermostAdapter {
     }
 
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
+        // Resolve DM targets (dm:{user_id}) to a real Mattermost channel ID.
+        let resolved_target;
+        let target = if let Some(user_id) = target.strip_prefix("dm:") {
+            resolved_target = self.get_or_create_dm_channel(user_id).await?;
+            resolved_target.as_str()
+        } else {
+            target
+        };
+
         match response {
             OutboundResponse::Text(text) => {
                 for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
@@ -802,14 +891,23 @@ impl Messaging for MattermostAdapter {
                 let form = reqwest::multipart::Form::new()
                     .part("files", part)
                     .text("channel_id", target.to_string());
-                let upload: MattermostFileUpload = self
+                let upload_response = self
                     .client
                     .post(self.api_url("/files"))
                     .bearer_auth(self.token.as_ref())
                     .multipart(form)
                     .send()
                     .await
-                    .context("failed to upload file")?
+                    .context("failed to upload file")?;
+                let upload_status = upload_response.status();
+                if !upload_status.is_success() {
+                    let body = upload_response.text().await.unwrap_or_default();
+                    return Err(anyhow::anyhow!(
+                        "mattermost file upload failed with status {}: {body}",
+                        upload_status.as_u16()
+                    ).into());
+                }
+                let upload: MattermostFileUpload = upload_response
                     .json()
                     .await
                     .context("failed to parse file upload response")?;
@@ -990,7 +1088,6 @@ impl MattermostUser {
 
 #[derive(Debug, Deserialize)]
 struct MattermostChannel {
-    #[allow(dead_code)]
     id: String,
     display_name: String,
 }
@@ -1071,11 +1168,24 @@ async fn resolve_user_display_name(
     url.path_segments_mut()
         .ok()?
         .extend(["api", "v4", "users", user_id]);
-    let resp = client.get(url).bearer_auth(token).send().await.ok()?;
+    let resp = match client.get(url).bearer_auth(token).send().await {
+        Ok(r) => r,
+        Err(error) => {
+            tracing::debug!(%error, user_id, "failed to fetch mattermost user");
+            return None;
+        }
+    };
     if !resp.status().is_success() {
+        tracing::debug!(status = %resp.status(), user_id, "mattermost user fetch returned non-success");
         return None;
     }
-    let user: MattermostUser = resp.json().await.ok()?;
+    let user: MattermostUser = match resp.json().await {
+        Ok(u) => u,
+        Err(error) => {
+            tracing::debug!(%error, user_id, "failed to parse mattermost user response");
+            return None;
+        }
+    };
     let name = user.display_name();
     cache.write().await.insert(user_id.to_string(), name.clone());
     Some(name)
@@ -1095,11 +1205,24 @@ async fn resolve_channel_name(
     url.path_segments_mut()
         .ok()?
         .extend(["api", "v4", "channels", channel_id]);
-    let resp = client.get(url).bearer_auth(token).send().await.ok()?;
+    let resp = match client.get(url).bearer_auth(token).send().await {
+        Ok(r) => r,
+        Err(error) => {
+            tracing::debug!(%error, channel_id, "failed to fetch mattermost channel");
+            return None;
+        }
+    };
     if !resp.status().is_success() {
+        tracing::debug!(status = %resp.status(), channel_id, "mattermost channel fetch returned non-success");
         return None;
     }
-    let channel: MattermostChannel = resp.json().await.ok()?;
+    let channel: MattermostChannel = match resp.json().await {
+        Ok(c) => c,
+        Err(error) => {
+            tracing::debug!(%error, channel_id, "failed to parse mattermost channel response");
+            return None;
+        }
+    };
     let name = channel.display_name;
     cache.write().await.insert(channel_id.to_string(), name.clone());
     Some(name)
@@ -1139,11 +1262,12 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
             break;
         }
 
-        let search_region = &remaining[..max_len];
+        let search_end = remaining.floor_char_boundary(max_len);
+        let search_region = &remaining[..search_end];
         let break_point = search_region
             .rfind('\n')
             .or_else(|| search_region.rfind(' '))
-            .unwrap_or(max_len);
+            .unwrap_or(search_end);
 
         let end = remaining.floor_char_boundary(break_point);
         chunks.push(remaining[..end].to_string());

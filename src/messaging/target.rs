@@ -141,7 +141,8 @@ pub fn resolve_broadcast_target(channel: &ChannelInfo) -> Option<BroadcastTarget
                 .or_else(|| from.as_deref().and_then(normalize_email_target))?
         }
         "mattermost" => {
-            if let Some(channel_id) = channel
+            let adapter = extract_mattermost_adapter_from_channel_id(&channel.id);
+            let raw_target = if let Some(channel_id) = channel
                 .platform_meta
                 .as_ref()
                 .and_then(|meta| meta.get("mattermost_channel_id"))
@@ -151,13 +152,19 @@ pub fn resolve_broadcast_target(channel: &ChannelInfo) -> Option<BroadcastTarget
             } else {
                 // conversation id: mattermost:{team_id}:{channel_id}
                 // or mattermost:{team_id}:dm:{user_id}
+                // Named instance: mattermost:{instance}:{team_id}:{channel_id}
+                // Named DM:       mattermost:{instance}:{team_id}:dm:{user_id}
                 let parts: Vec<&str> = channel.id.split(':').collect();
                 match parts.as_slice() {
-                    ["mattermost", _team_id, "dm", user_id] => format!("dm:{user_id}"),
-                    ["mattermost", _team_id, channel_id] => (*channel_id).to_string(),
+                    [_, _team_id, "dm", user_id] => format!("dm:{user_id}"),
+                    [_, _team_id, channel_id] => (*channel_id).to_string(),
+                    [_, _instance, _team_id, "dm", user_id] => format!("dm:{user_id}"),
+                    [_, _instance, _team_id, channel_id] => (*channel_id).to_string(),
                     _ => return None,
                 }
-            }
+            };
+            let target = normalize_mattermost_target(&raw_target)?;
+            return Some(BroadcastTarget { adapter, target });
         }
         _ => return None,
     };
@@ -258,13 +265,43 @@ fn normalize_twitch_target(raw_target: &str) -> Option<String> {
     }
 }
 
+fn extract_mattermost_adapter_from_channel_id(channel_id: &str) -> String {
+    // Named instance conv IDs: "mattermost:{instance}:{team_id}:{channel_id}" (4 parts)
+    //                      or: "mattermost:{instance}:{team_id}:dm:{user_id}" (5 parts)
+    // Default conv IDs:        "mattermost:{team_id}:{channel_id}" (3 parts)
+    //                      or: "mattermost:{team_id}:dm:{user_id}" (4 parts, 3rd part = "dm")
+    let parts: Vec<&str> = channel_id.split(':').collect();
+    match parts.as_slice() {
+        ["mattermost", instance, _, channel_or_team] if *channel_or_team != "dm" => {
+            format!("mattermost:{instance}")
+        }
+        ["mattermost", instance, _, "dm", _] => {
+            format!("mattermost:{instance}")
+        }
+        _ => "mattermost".to_string(),
+    }
+}
+
 fn normalize_mattermost_target(raw_target: &str) -> Option<String> {
     let target = strip_repeated_prefix(raw_target, "mattermost");
-    // Accept channel IDs (opaque alphanumeric strings) and dm:user_id patterns
-    if target.is_empty() {
-        None
-    } else {
-        Some(target.to_string())
+    // Parse out just the channel_id or dm:{user_id}, discarding any team/instance prefix.
+    match target.split(':').collect::<Vec<_>>().as_slice() {
+        // Already bare: "channel_id" or "dm:user_id"
+        [channel_id] if !channel_id.is_empty() => Some((*channel_id).to_string()),
+        ["dm", user_id] if !user_id.is_empty() => Some(format!("dm:{user_id}")),
+        // With team prefix: "team_id:channel_id" or "team_id:dm:user_id"
+        [_team_id, channel_id] if !channel_id.is_empty() && *channel_id != "dm" => {
+            Some((*channel_id).to_string())
+        }
+        [_team_id, "dm", user_id] if !user_id.is_empty() => Some(format!("dm:{user_id}")),
+        // With instance+team prefix: "instance:team_id:channel_id" or "instance:team_id:dm:user_id"
+        [_instance, _team_id, channel_id] if !channel_id.is_empty() && *channel_id != "dm" => {
+            Some((*channel_id).to_string())
+        }
+        [_instance, _team_id, "dm", user_id] if !user_id.is_empty() => {
+            Some(format!("dm:{user_id}"))
+        }
+        _ => None,
     }
 }
 
