@@ -91,7 +91,7 @@ impl MattermostAdapter {
             return Err(anyhow::anyhow!(
                 "mattermost base_url must be an origin URL without path/query/fragment (got: {})",
                 base_url
-            ).into());
+            ));
         }
 
         let client = Client::builder()
@@ -595,8 +595,8 @@ impl Messaging for MattermostAdapter {
                                             tracing::info!(adapter = %runtime_key, "websocket closed by server");
                                             break;
                                         }
-                                        Some(Err(e)) => {
-                                            tracing::error!(adapter = %runtime_key, error = %e, "websocket error");
+                                        Some(Err(error)) => {
+                                            tracing::error!(adapter = %runtime_key, %error, "websocket error");
                                             break;
                                         }
                                         None => break,
@@ -608,10 +608,10 @@ impl Messaging for MattermostAdapter {
 
                         tracing::info!(adapter = %runtime_key, "websocket disconnected, reconnecting...");
                     }
-                    Err(e) => {
+                    Err(error) => {
                         tracing::error!(
                             adapter = %runtime_key,
-                            error = %e,
+                            %error,
                             delay_ms = retry_delay.as_millis(),
                             "websocket connection failed, retrying"
                         );

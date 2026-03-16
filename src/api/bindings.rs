@@ -695,6 +695,8 @@ pub(super) async fn update_binding(
         .and_then(|b| b.as_array_of_tables_mut())
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let request_team_id = request.original_team_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
     let mut match_idx: Option<usize> = None;
     for (i, table) in bindings_array.iter().enumerate() {
         let matches_agent = table
@@ -733,9 +735,8 @@ pub(super) async fn update_binding(
                 .is_some_and(|v| v == chat_id),
             None => table.get("chat_id").is_none(),
         };
-        let req_team_id = request.original_team_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let toml_team_id = table.get("team_id").and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
-        let matches_team = req_team_id == toml_team_id;
+        let matches_team = request_team_id == toml_team_id;
         if matches_agent
             && matches_channel
             && matches_adapter
@@ -897,6 +898,8 @@ pub(super) async fn delete_binding(
         .and_then(|b| b.as_array_of_tables_mut())
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let request_team_id = request.team_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
     let mut match_idx: Option<usize> = None;
     for (i, table) in bindings_array.iter().enumerate() {
         let matches_agent = table
@@ -935,9 +938,8 @@ pub(super) async fn delete_binding(
                 .is_some_and(|v| v == chat_id),
             None => table.get("chat_id").is_none(),
         };
-        let req_team_id = request.team_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
         let toml_team_id = table.get("team_id").and_then(|v: &toml_edit::Item| v.as_str()).map(str::trim).filter(|s| !s.is_empty());
-        let matches_team = req_team_id == toml_team_id;
+        let matches_team = request_team_id == toml_team_id;
         if matches_agent
             && matches_channel
             && matches_adapter
