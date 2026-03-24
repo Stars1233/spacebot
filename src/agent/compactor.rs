@@ -284,6 +284,9 @@ pub fn estimate_history_tokens(history: &[Message]) -> usize {
                     chars += estimate_assistant_content_chars(item);
                 }
             }
+            Message::System { content } => {
+                chars += content.len();
+            }
         }
     }
 
@@ -380,6 +383,11 @@ fn render_messages_as_transcript(messages: &[Message]) -> String {
                         _ => {}
                     }
                 }
+            }
+            Message::System { content } => {
+                output.push_str("System: ");
+                output.push_str(content);
+                output.push('\n');
             }
         }
     }

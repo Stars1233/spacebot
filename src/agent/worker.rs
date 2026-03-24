@@ -938,6 +938,10 @@ impl Worker {
                         }
                     }
                 }
+                rig::message::Message::System { content } => {
+                    let _ = writeln!(log, "[{index}] System:");
+                    let _ = writeln!(log, "  {content}");
+                }
             }
         }
 
@@ -1130,6 +1134,7 @@ fn build_worker_recap(messages: &[rig::message::Message]) -> String {
                     }
                 }
             }
+            rig::message::Message::System { .. } => {}
         }
     }
 

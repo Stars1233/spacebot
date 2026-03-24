@@ -1306,6 +1306,10 @@ pub fn convert_messages_to_anthropic(messages: &OneOrMany<Message>) -> Vec<serde
                 (!parts.is_empty())
                     .then(|| serde_json::json!({"role": "assistant", "content": parts}))
             }
+            Message::System { content } => Some(serde_json::json!({
+                "role": "user",
+                "content": content,
+            })),
         })
         .collect()
 }
@@ -1366,6 +1370,12 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                 }
 
                 result.extend(tool_results);
+            }
+            Message::System { content } => {
+                result.push(serde_json::json!({
+                    "role": "user",
+                    "content": content,
+                }));
             }
             Message::Assistant { content, .. } => {
                 let mut text_parts = Vec::new();
@@ -1485,6 +1495,12 @@ fn convert_messages_to_openai_responses(messages: &OneOrMany<Message>) -> Vec<se
                         "content": content_parts,
                     }));
                 }
+            }
+            Message::System { content } => {
+                result.push(serde_json::json!({
+                    "role": "user",
+                    "content": content,
+                }));
             }
             Message::Assistant { content, .. } => {
                 let mut text_parts = Vec::new();
@@ -3066,6 +3082,39 @@ mod tests {
         let error = parse_anthropic_response(body).expect_err("should fail");
         assert!(matches!(error, CompletionError::ResponseError(_)));
         assert!(error.to_string().contains("stop_reason: max_tokens"));
+    }
+
+    #[test]
+    fn convert_messages_to_anthropic_maps_system_to_user_role() {
+        let messages = OneOrMany::one(Message::System {
+            content: "You are a helpful assistant".to_string(),
+        });
+        let converted = convert_messages_to_anthropic(&messages);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["role"], "user");
+        assert_eq!(converted[0]["content"], "You are a helpful assistant");
+    }
+
+    #[test]
+    fn convert_messages_to_openai_maps_system_to_user_role() {
+        let messages = OneOrMany::one(Message::System {
+            content: "You are a helpful assistant".to_string(),
+        });
+        let converted = convert_messages_to_openai(&messages);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["role"], "user");
+        assert_eq!(converted[0]["content"], "You are a helpful assistant");
+    }
+
+    #[test]
+    fn convert_messages_to_openai_responses_maps_system_to_user_role() {
+        let messages = OneOrMany::one(Message::System {
+            content: "You are a helpful assistant".to_string(),
+        });
+        let converted = convert_messages_to_openai_responses(&messages);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["role"], "user");
+        assert_eq!(converted[0]["content"], "You are a helpful assistant");
     }
 
     #[test]
