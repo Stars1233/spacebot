@@ -187,6 +187,8 @@ pub enum ApiType {
     Anthropic,
     /// Google Gemini API (https://generativelanguage.googleapis.com/v1beta/openai/chat/completions)
     Gemini,
+    /// Azure OpenAI API (https://{resource}.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version={version})
+    Azure,
 }
 
 impl<'de> serde::Deserialize<'de> for ApiType {
@@ -201,16 +203,17 @@ impl<'de> serde::Deserialize<'de> for ApiType {
             "openai_responses" => Ok(Self::OpenAiResponses),
             "anthropic" => Ok(Self::Anthropic),
             "gemini" => Ok(Self::Gemini),
+            "azure" => Ok(Self::Azure),
             other => Err(serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(other),
-                &"one of \"openai_completions\", \"openai_chat_completions\", \"kilo_gateway\", \"openai_responses\", \"anthropic\", or \"gemini\"",
+                &"one of \"openai_completions\", \"openai_chat_completions\", \"kilo_gateway\", \"openai_responses\", \"anthropic\", \"gemini\", or \"azure\"",
             )),
         }
     }
 }
 
 /// Configuration for a single LLM provider.
-#[derive(Clone)]
+#[derive(Clone, serde::Deserialize)]
 pub struct ProviderConfig {
     pub api_type: ApiType,
     pub base_url: String,
@@ -219,10 +222,18 @@ pub struct ProviderConfig {
     /// When true, use `Authorization: Bearer` instead of `x-api-key` for
     /// Anthropic requests. Set automatically when the key originates from
     /// `ANTHROPIC_AUTH_TOKEN` (proxy-compatible auth).
+    #[serde(default)]
     pub use_bearer_auth: bool,
     /// Additional HTTP headers included in requests to this provider.
     /// Currently applied in `call_openai()` (the `OpenAiCompletions` path).
+    #[serde(default)]
     pub extra_headers: Vec<(String, String)>,
+    /// Azure API version (e.g., "2024-12-01-preview"). Required for Azure providers.
+    #[serde(default)]
+    pub api_version: Option<String>,
+    /// Azure deployment name (e.g., "gpt-4o"). Required for Azure providers.
+    #[serde(default)]
+    pub deployment: Option<String>,
 }
 
 impl std::fmt::Debug for ProviderConfig {

@@ -1583,27 +1583,42 @@ export const api = {
 
 	// Provider management
 	providers: () => fetchJson<Types.ProvidersResponse>("/providers"),
-	updateProvider: async (provider: string, apiKey: string, model: string) => {
+	updateProvider: async (provider: string, apiKey: string, model: string, baseUrl?: string, apiVersion?: string, deployment?: string) => {
 		const response = await fetch(`${getApiBase()}/providers`, {
-			method: "PUT",
+			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ provider, api_key: apiKey, model }),
+			body: JSON.stringify({ provider, api_key: apiKey, model, base_url: baseUrl, api_version: apiVersion, deployment }),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<Types.ProviderUpdateResponse>;
 	},
-	testProviderModel: async (provider: string, apiKey: string, model: string) => {
-		const response = await fetch(`${getApiBase()}/providers/test`, {
+	testProviderModel: async (provider: string, apiKey: string, model: string, baseUrl?: string, apiVersion?: string, deployment?: string) => {
+		const response = await fetch(`${getApiBase()}/providers/test-model`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ provider, api_key: apiKey, model }),
+			body: JSON.stringify({ provider, api_key: apiKey, model, base_url: baseUrl, api_version: apiVersion, deployment }),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<Types.ProviderModelTestResponse>;
+	},
+	getProviderConfig: async (provider: string) => {
+		const response = await fetch(`${getApiBase()}/providers/${provider}/config`, {
+			method: "GET",
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<{
+			success: boolean;
+			message: string;
+			base_url?: string | null;
+			api_version?: string | null;
+			deployment?: string | null;
+		}>;
 	},
 	startOpenAiOAuthBrowser: async (params: {model: string}) => {
 		const response = await fetch(`${getApiBase()}/providers/openai/oauth/browser/start`, {

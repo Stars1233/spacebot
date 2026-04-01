@@ -252,6 +252,14 @@ const PROVIDERS = [
 		defaultModel: "github-copilot/claude-sonnet-4",
 	},
 	{
+		id: "azure",
+		name: "Azure OpenAI",
+		description: "Azure OpenAI Service with custom deployments",
+		placeholder: "Azure API key (alphanumeric string)",
+		envVar: "AZURE_API_KEY",
+		defaultModel: "azure/gpt-4o",
+	},
+	{
 		id: "ollama",
 		name: "Ollama",
 		description: "Local or remote Ollama API endpoint",
@@ -305,6 +313,10 @@ export function Settings() {
 		type: "success" | "error";
 	} | null>(null);
 
+	const [azureBaseUrl, setAzureBaseUrl] = useState("");
+	const [azureApiVersion, setAzureApiVersion] = useState("");
+	const [azureDeployment, setAzureDeployment] = useState("");
+
 	// Fetch providers data (only when on providers tab)
 	const { data, isLoading } = useQuery({
 		queryKey: ["providers"],
@@ -322,8 +334,8 @@ export function Settings() {
 	});
 
 	const updateMutation = useMutation({
-		mutationFn: ({ provider, apiKey, model }: { provider: string; apiKey: string; model: string }) =>
-			api.updateProvider(provider, apiKey, model),
+		mutationFn: ({ provider, apiKey, model, baseUrl, apiVersion, deployment }: { provider: string; apiKey: string; model: string; baseUrl?: string; apiVersion?: string; deployment?: string }) =>
+			api.updateProvider(provider, apiKey, model, baseUrl, apiVersion, deployment),
 		onSuccess: (result) => {
 			if (result.success) {
 				setEditingProvider(null);
@@ -348,8 +360,14 @@ export function Settings() {
 	});
 
 	const testModelMutation = useMutation({
-		mutationFn: ({ provider, apiKey, model }: { provider: string; apiKey: string; model: string }) =>
-			api.testProviderModel(provider, apiKey, model),
+		mutationFn: ({ provider, apiKey, model, baseUrl, apiVersion, deployment }: {
+			provider: string;
+			apiKey: string;
+			model: string;
+			baseUrl?: string;
+			apiVersion?: string;
+			deployment?: string;
+		}) => api.testProviderModel(provider, apiKey, model, baseUrl, apiVersion, deployment),
 	});
 	const startOpenAiBrowserOAuthMutation = useMutation({
 		mutationFn: (params: { model: string }) => api.startOpenAiOAuthBrowser(params),
@@ -379,6 +397,26 @@ export function Settings() {
 
 	const handleTestModel = async (): Promise<boolean> => {
 		if (!editingProvider || !keyInput.trim() || !modelInput.trim()) return false;
+
+		if (editingProvider === "azure") {
+			if (!azureBaseUrl.trim()) {
+				setTestResult({ success: false, message: "Base URL is required for Azure OpenAI" });
+				return false;
+			}
+			if (!azureApiVersion.trim()) {
+				setTestResult({ success: false, message: "API Version is required for Azure OpenAI" });
+				return false;
+			}
+			if (!azureDeployment.trim()) {
+				setTestResult({ success: false, message: "Deployment Name is required for Azure OpenAI" });
+				return false;
+			}
+			if (!azureBaseUrl.trim().includes(".openai.azure.com")) {
+				setTestResult({ success: false, message: "Base URL must contain '.openai.azure.com' (e.g., https://{resource-name}.openai.azure.com)" });
+				return false;
+			}
+		}
+
 		setMessage(null);
 		setTestResult(null);
 		try {
@@ -386,6 +424,9 @@ export function Settings() {
 				provider: editingProvider,
 				apiKey: keyInput.trim(),
 				model: modelInput.trim(),
+				baseUrl: editingProvider === "azure" ? azureBaseUrl.trim() : undefined,
+				apiVersion: editingProvider === "azure" ? azureApiVersion.trim() : undefined,
+				deployment: editingProvider === "azure" ? azureDeployment.trim() : undefined,
 			});
 			setTestResult({ success: result.success, message: result.message, sample: result.sample });
 			if (result.success) {
@@ -405,16 +446,46 @@ export function Settings() {
 	const handleSave = async () => {
 		if (!keyInput.trim() || !editingProvider || !modelInput.trim()) return;
 
+		if (editingProvider === "azure") {
+			if (!azureBaseUrl.trim()) {
+				setMessage({ text: "Base URL is required for Azure OpenAI", type: "error" });
+				return;
+			}
+			if (!azureApiVersion.trim()) {
+				setMessage({ text: "API Version is required for Azure OpenAI", type: "error" });
+				return;
+			}
+			if (!azureDeployment.trim()) {
+				setMessage({ text: "Deployment Name is required for Azure OpenAI", type: "error" });
+				return;
+			}
+			if (!azureBaseUrl.trim().includes(".openai.azure.com")) {
+				setMessage({ text: "Base URL must contain '.openai.azure.com'", type: "error" });
+				return;
+			}
+		}
+
 		if (testedSignature !== currentSignature) {
 			const testPassed = await handleTestModel();
 			if (!testPassed) return;
 		}
 
-		updateMutation.mutate({
-			provider: editingProvider,
-			apiKey: keyInput.trim(),
-			model: modelInput.trim(),
-		});
+		if (editingProvider === "azure") {
+			updateMutation.mutate({
+				provider: editingProvider,
+				apiKey: keyInput.trim(),
+				model: modelInput.trim(),
+				baseUrl: azureBaseUrl.trim(),
+				apiVersion: azureApiVersion.trim(),
+				deployment: azureDeployment.trim(),
+			});
+		} else {
+			updateMutation.mutate({
+				provider: editingProvider,
+				apiKey: keyInput.trim(),
+				model: modelInput.trim(),
+			});
+		}
 	};
 
 	const monitorOpenAiBrowserOAuth = async (stateToken: string, signal: AbortSignal) => {
@@ -565,6 +636,9 @@ export function Settings() {
 		setModelInput("");
 		setTestedSignature(null);
 		setTestResult(null);
+		setAzureBaseUrl("");
+		setAzureApiVersion("");
+		setAzureDeployment("");
 	};
 
 	const isConfigured = (providerId: string): boolean => {
@@ -653,6 +727,35 @@ export function Settings() {
 													setTestedSignature(null);
 													setTestResult(null);
 													setMessage(null);
+													if (provider.id === "azure") {
+														// Fetch existing Azure config and populate fields
+														api.getProviderConfig("azure")
+															.then((result) => {
+																if (result.success) {
+																	if (result.base_url) {
+																		setAzureBaseUrl(result.base_url);
+																	}
+																	if (result.api_version) {
+																		setAzureApiVersion(result.api_version);
+																	}
+																	if (result.deployment) {
+																		setAzureDeployment(result.deployment);
+																		setModelInput(`azure/${result.deployment}`);
+																	}
+																	if (result.api_key) {
+																		setKeyInput(result.api_key);
+																	}
+																}
+															})
+															.catch((error) => {
+																console.error("Failed to fetch Azure config:", error);
+																// Clear fields if config not found
+																setAzureBaseUrl("");
+																setAzureApiVersion("");
+																setAzureDeployment("");
+																setKeyInput("");
+															});
+													}
 												}}
 												onRemove={() => removeMutation.mutate(provider.id)}
 												removing={removeMutation.isPending}
@@ -733,43 +836,131 @@ export function Settings() {
 					<DialogHeader>
 						<DialogTitle>
 							{isConfigured(editingProvider ?? "") ? "Update" : "Add"}{" "}
-							{editingProvider === "ollama" ? "Endpoint" : "API Key"}
+							{editingProvider === "ollama" || editingProvider === "azure" ? "Endpoint" : "API Key"}
 						</DialogTitle>
 						<DialogDescription>
 							{editingProvider === "ollama"
 								? `Enter your ${editingProviderData?.name} base URL. It will be saved to your instance config.`
+								: editingProvider === "azure"
+									? "Enter your Azure OpenAI configuration. API key, base URL, API version, and deployment name are required."
 								: editingProvider === "openai"
 									? "Enter an OpenAI API key. The model below will be applied to routing."
 								: `Enter your ${editingProviderData?.name} API key. It will be saved to your instance config.`}
 						</DialogDescription>
 					</DialogHeader>
-					<Input
-						type={editingProvider === "ollama" ? "text" : "password"}
-						value={keyInput}
-						onChange={(e) => {
-							setKeyInput(e.target.value);
-							setTestedSignature(null);
-						}}
-						placeholder={editingProviderData?.placeholder}
-						autoFocus
-						onKeyDown={(e) => {
-							if (e.key === "Enter") handleSave();
-						}}
-					/>
-					<ModelSelect
-						label="Model"
-						description="Pick the exact model ID to verify and apply to routing"
-						value={modelInput}
-						onChange={(value) => {
-							setModelInput(value);
-							setTestedSignature(null);
-						}}
-						provider={editingProvider ?? undefined}
-					/>
-					<div className="flex items-center gap-2">
+					{editingProvider === "azure" ? (
+						<>
+							<Input
+								type="password"
+								value={keyInput}
+								onChange={(e) => {
+									setKeyInput(e.target.value);
+									setTestedSignature(null);
+								}}
+								placeholder="Azure API key"
+								autoFocus
+								onKeyDown={(e) => {
+									if (e.key === "Enter") handleSave();
+								}}
+							/>
+							<div className="space-y-1.5 mt-3">
+								<label className="text-sm font-medium text-ink">Base URL</label>
+								<Input
+									type="text"
+									value={azureBaseUrl}
+									onChange={(e) => {
+										setAzureBaseUrl(e.target.value);
+										setTestedSignature(null);
+									}}
+									placeholder="https://{resource-name}.openai.azure.com"
+									onKeyDown={(e) => {
+										if (e.key === "Enter") handleSave();
+									}}
+								/>
+								<p className="text-tiny text-ink-faint">
+									Must contain '.openai.azure.com'
+								</p>
+							</div>
+							<div className="space-y-1.5 mt-3">
+								<label className="text-sm font-medium text-ink">API Version</label>
+								<Input
+									type="text"
+									value={azureApiVersion}
+									onChange={(e) => {
+										setAzureApiVersion(e.target.value);
+										setTestedSignature(null);
+									}}
+									placeholder="2024-06-01"
+									onKeyDown={(e) => {
+										if (e.key === "Enter") handleSave();
+									}}
+								/>
+								<p className="text-tiny text-ink-faint">
+									For example: 2024-06-01, 2024-10-01-preview
+								</p>
+							</div>
+							<div className="space-y-1.5 mt-3">
+								<label className="text-sm font-medium text-ink">Deployment Name</label>
+								<Input
+									type="text"
+									value={azureDeployment}
+									onChange={(e) => {
+										setAzureDeployment(e.target.value);
+										setTestedSignature(null);
+									}}
+									placeholder="gpt-4o"
+									onKeyDown={(e) => {
+										if (e.key === "Enter") handleSave();
+									}}
+								/>
+								<p className="text-tiny text-ink-faint">
+									Your Azure OpenAI deployment name
+								</p>
+							</div>
+							<div className="space-y-1.5 mt-3">
+								<label className="text-sm font-medium text-ink">Model</label>
+								<Input
+									type="text"
+									value={`azure/${azureDeployment || "deployment"}`}
+									disabled
+									className="bg-app-darkBox/50"
+								/>
+								<p className="text-tiny text-ink-faint">
+									Model is auto-generated from deployment name
+								</p>
+							</div>
+						</>
+					) : (
+						<>
+							<Input
+								type={editingProvider === "ollama" ? "text" : "password"}
+								value={keyInput}
+								onChange={(e) => {
+									setKeyInput(e.target.value);
+									setTestedSignature(null);
+								}}
+								placeholder={editingProviderData?.placeholder}
+								autoFocus
+								onKeyDown={(e) => {
+									if (e.key === "Enter") handleSave();
+								}}
+							/>
+							<ModelSelect
+								label="Model"
+								description="Pick the exact model ID to verify and apply to routing"
+								value={modelInput}
+								onChange={(value) => {
+									setModelInput(value);
+									setTestedSignature(null);
+								}}
+								provider={editingProvider ?? undefined}
+							/>
+						</>
+					)}
+					<div className="flex items-center gap-2 mt-3">
 						<Button
 							onClick={handleTestModel}
-							disabled={!editingProvider || !keyInput.trim() || !modelInput.trim()}
+							disabled={!editingProvider || !keyInput.trim() || !modelInput.trim() || (editingProvider === "azure" && (!azureBaseUrl.trim() || !azureApiVersion.trim() || !azureDeployment.trim()))}
 							loading={testModelMutation.isPending}
 							variant="outline"
 							size="sm"
@@ -804,17 +995,43 @@ export function Settings() {
 						</div>
 					)}
 					<DialogFooter>
-						<Button onClick={handleClose} variant="ghost" size="sm">
-							Cancel
-						</Button>
-						<Button
-							onClick={handleSave}
-							disabled={!keyInput.trim() || !modelInput.trim()}
-							loading={updateMutation.isPending}
-							size="sm"
-						>
-							Save
-						</Button>
+						{editingProvider === "azure" && isConfigured(editingProvider ?? "") ? (
+							<>
+								<Button
+									onClick={() => removeMutation.mutate(editingProvider)}
+									loading={removeMutation.isPending}
+									variant="destructive"
+									size="sm"
+								>
+									Remove
+								</Button>
+								<Button onClick={handleClose} variant="ghost" size="sm">
+									Cancel
+								</Button>
+								<Button
+									onClick={handleSave}
+									disabled={!keyInput.trim() || !azureBaseUrl.trim() || !azureApiVersion.trim() || !azureDeployment.trim()}
+									loading={updateMutation.isPending}
+									size="sm"
+								>
+									Save
+								</Button>
+							</>
+						) : (
+							<>
+								<Button onClick={handleClose} variant="ghost" size="sm">
+									Cancel
+								</Button>
+								<Button
+									onClick={handleSave}
+									disabled={!keyInput.trim() || !modelInput.trim()}
+									loading={updateMutation.isPending}
+									size="sm"
+								>
+									Save
+								</Button>
+							</>
+						)}
 					</DialogFooter>
 				</DialogContent>
 			</Dialog>

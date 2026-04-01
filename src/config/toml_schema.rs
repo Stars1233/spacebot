@@ -152,6 +152,10 @@ pub(super) struct TomlProviderConfig {
     pub(super) base_url: String,
     pub(super) api_key: String,
     pub(super) name: Option<String>,
+    #[serde(default)]
+    pub(super) api_version: Option<String>,
+    #[serde(default)]
+    pub(super) deployment: Option<String>,
 }
 
 #[derive(Deserialize, Default)]

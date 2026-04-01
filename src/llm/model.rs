@@ -157,6 +157,76 @@ impl SpacebotModel {
                 )
                 .await
             }
+            ApiType::Azure => {
+                // Azure OpenAI Service requires a specific endpoint structure.
+                // Supported domain: *.openai.azure.com
+                let base_url = provider_config.base_url.trim_end_matches('/');
+
+                // Validate that the endpoint is actually an Azure OpenAI endpoint
+                if !base_url.ends_with(".openai.azure.com") {
+                    return Err(CompletionError::ProviderError(format!(
+                        "Invalid Azure endpoint. Azure OpenAI Service requires a base_url ending in '.openai.azure.com'.\n\
+                        \n\
+                        Detected: {}\n\
+                        \n\
+                        If you are using Azure AI Foundry (hosting Anthropic, Llama, Mistral, etc.) or other Azure-hosted models,\n\
+                        use the standard OpenAI-compatible provider instead:\n\
+                        - Set api_type = \"openai_chat_completions\"\n\
+                        - Point base_url directly to your endpoint (e.g., https://<resource>.services.ai.azure.com)\n\
+                        - Omit the 'deployment' and 'api_version' fields\n\
+                        \n\
+                        For Azure OpenAI Service, the endpoint must follow this pattern:\n\
+                        https://<resource-name>.openai.azure.com",
+                        base_url
+                    )));
+                }
+
+                let resource = base_url
+                    .trim_start_matches("https://")
+                    .trim_end_matches(".openai.azure.com");
+
+                let deployment = provider_config
+                    .deployment
+                    .as_ref()
+                    .ok_or_else(|| CompletionError::ProviderError(
+                        "Azure deployment name is required. Example: 'gpt-4o', 'gpt-35-turbo', etc.\n\
+                        This is the deployment name you created in the Azure Portal for your OpenAI model."
+                            .to_string()
+                    ))?;
+
+                let api_version = provider_config
+                    .api_version
+                    .as_ref()
+                    .ok_or_else(|| CompletionError::ProviderError(
+                        "Azure API version is required. Example: '2024-12-01-preview'\n\
+                        Find available API versions in the Azure OpenAI documentation."
+                            .to_string()
+                    ))?;
+
+                let endpoint = format!(
+                    "https://{}.openai.azure.com/openai/deployments/{}/chat/completions?api-version={}",
+                    resource, deployment, api_version
+                );
+
+                let display_name = provider_config
+                    .name
+                    .as_deref()
+                    .unwrap_or("Azure OpenAI");
+
+                // Azure uses "api-key" header instead of Authorization
+                let headers: Vec<(&str, &str)> = vec![
+                    ("api-key", provider_config.api_key.as_str()),
+                ];
+
+                self.call_openai_compatible_with_optional_auth(
+                    request,
+                    display_name,
+                    &endpoint,
+                    None, // No Bearer token needed
+                    &headers,
+                )
+                .await
+            }
             ApiType::KiloGateway => {
                 let endpoint = format!(
                     "{}/chat/completions",
@@ -520,6 +590,75 @@ impl CompletionModel for SpacebotModel {
                 )
                 .await
             }
+            ApiType::Azure => {
+                // Azure OpenAI Service requires a specific endpoint structure.
+                // Supported domain: *.openai.azure.com
+                let base_url = provider_config.base_url.trim_end_matches('/');
+
+                // Validate that the endpoint is actually an Azure OpenAI endpoint
+                if !base_url.ends_with(".openai.azure.com") {
+                    return Err(CompletionError::ProviderError(format!(
+                        "Invalid Azure endpoint. Azure OpenAI Service requires a base_url ending in '.openai.azure.com'.\n\
+                        \n\
+                        Detected: {}\n\
+                        \n\
+                        If you are using Azure AI Foundry (hosting Anthropic, Llama, Mistral, etc.) or other Azure-hosted models,\n\
+                        use the standard OpenAI-compatible provider instead:\n\
+                        - Set api_type = \"openai_chat_completions\"\n\
+                        - Point base_url directly to your endpoint (e.g., https://<resource>.services.ai.azure.com)\n\
+                        - Omit the 'deployment' and 'api_version' fields\n\
+                        \n\
+                        For Azure OpenAI Service, the endpoint must follow this pattern:\n\
+                        https://<resource-name>.openai.azure.com",
+                        base_url
+                    )));
+                }
+
+                let resource = base_url
+                    .trim_start_matches("https://")
+                    .trim_end_matches(".openai.azure.com");
+
+                let deployment = provider_config
+                    .deployment
+                    .as_ref()
+                    .ok_or_else(|| CompletionError::ProviderError(
+                        "Azure deployment name is required. Example: 'gpt-4o', 'gpt-35-turbo', etc.\n\
+                        This is the deployment name you created in the Azure Portal for your OpenAI model."
+                            .to_string()
+                    ))?;
+
+                let api_version = provider_config
+                    .api_version
+                    .as_ref()
+                    .ok_or_else(|| CompletionError::ProviderError(
+                        "Azure API version is required. Example: '2024-12-01-preview'\n\
+                        Find available API versions in the Azure OpenAI documentation."
+                            .to_string()
+                    ))?;
+
+                let endpoint = format!(
+                    "https://{}.openai.azure.com/openai/deployments/{}/chat/completions?api-version={}",
+                    resource, deployment, api_version
+                );
+
+                let display_name = provider_config
+                    .name
+                    .as_deref()
+                    .unwrap_or("Azure OpenAI");
+
+                let headers: Vec<(&str, &str)> = vec![
+                    ("api-key", provider_config.api_key.as_str()),
+                ];
+
+                self.stream_openai_compatible_with_optional_auth(
+                    request,
+                    display_name,
+                    &endpoint,
+                    None,
+                    &headers,
+                )
+                .await
+            }
             ApiType::KiloGateway => {
                 let endpoint = format!(
                     "{}/chat/completions",
@@ -873,6 +1012,13 @@ impl SpacebotModel {
         let endpoint_path = match provider_config.api_type {
             ApiType::OpenAiCompletions | ApiType::OpenAiResponses => "/v1/chat/completions",
             ApiType::OpenAiChatCompletions | ApiType::Gemini => "/chat/completions",
+            ApiType::Azure => {
+                // Azure handles its own endpoint construction in the call() match
+                // This fallback should not be reached for Azure
+                return Err(CompletionError::ProviderError(format!(
+                    "Azure provider should use the dedicated Azure endpoint construction in call()"
+                )));
+            }
             ApiType::Anthropic => {
                 return Err(CompletionError::ProviderError(format!(
                     "{provider_display_name} is configured with anthropic API type, but this call expects an OpenAI-compatible API"

@@ -181,6 +181,7 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(providers::openai_browser_oauth_status))
         .routes(routes!(providers::test_provider_model))
         .routes(routes!(providers::delete_provider))
+        .routes(routes!(providers::get_provider_config))
         // Model routes
         .routes(routes!(models::get_models))
         .routes(routes!(models::refresh_models))

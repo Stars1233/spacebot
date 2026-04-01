@@ -195,6 +195,30 @@ api_key = "env:MY_PROVIDER_KEY"
 channel = "my-provider/my-model"
 ```
 
+**Azure OpenAI Service** — configure Azure OpenAI deployments:
+
+```toml
+[llm]
+azure_api_key = "env:AZURE_API_KEY"
+
+[llm.provider.azure]
+api_type = "azure"
+base_url = "https://{resource-name}.openai.azure.com"
+api_key = "env:AZURE_API_KEY"
+api_version = "2024-06-01"  # required
+deployment = "gpt-4o"        # required — your deployment name
+
+[defaults.routing]
+channel = "azure/gpt-4o"
+worker = "azure/gpt-4o-mini"
+```
+
+Important notes:
+- `base_url` must end with `.openai.azure.com`
+- `api_version` and `deployment` are required fields
+- API key authentication is handled automatically via the `api-key` header
+- For Azure AI Foundry (accessing Anthropic, Llama, or other models through Azure's model catalog), use `api_type = "openai_chat_completions"` instead and configure the deployment endpoint accordingly
+
 Additional built-in providers include **Kilo Gateway**, **OpenCode Go**, **NVIDIA**, **MiniMax**, **Moonshot AI (Kimi)**, and **Z.AI Coding Plan** — configure with `kilo_key`, `opencode_go_key`, `nvidia_key`, `minimax_key`, `moonshot_key`, or `zai_coding_plan_key` in `[llm]`.
 
 ### Skills
