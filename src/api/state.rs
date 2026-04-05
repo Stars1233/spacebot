@@ -158,6 +158,8 @@ pub enum ApiEvent {
         sender_name: Option<String>,
         sender_id: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<crate::agent::channel_attachments::SavedAttachmentMeta>,
     },
     /// An outbound message sent by the bot.
     OutboundMessage {

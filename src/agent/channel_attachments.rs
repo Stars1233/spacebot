@@ -501,7 +501,7 @@ pub(crate) fn content_from_bytes(bytes: &[u8], attachment: &crate::Attachment) -
 // ---------------------------------------------------------------------------
 
 /// Metadata for a saved attachment, returned after persisting to disk and DB.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SavedAttachmentMeta {
     pub id: String,
     pub filename: String,
@@ -526,6 +526,38 @@ pub(crate) async fn save_channel_attachments(
     let mut results = Vec::with_capacity(attachments.len());
 
     for attachment in attachments {
+        // Pre-saved: file is already on disk from a portal upload — read bytes
+        // and return the existing record without re-downloading or re-inserting.
+        if let (Some(id), Some(path)) = (&attachment.pre_saved_id, &attachment.disk_path) {
+            match tokio::fs::read(path).await {
+                Ok(bytes) => {
+                    let saved_filename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or(&attachment.filename)
+                        .to_string();
+                    results.push((
+                        SavedAttachmentMeta {
+                            id: id.clone(),
+                            filename: attachment.filename.clone(),
+                            saved_filename,
+                            mime_type: attachment.mime_type.clone(),
+                            size_bytes: attachment.size_bytes.unwrap_or(bytes.len() as u64),
+                        },
+                        bytes,
+                    ));
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        attachment_id = %id,
+                        "failed to read pre-saved attachment from disk"
+                    );
+                }
+            }
+            continue;
+        }
+
         let safe_name = match sanitize_filename(&attachment.filename) {
             Ok(name) => name,
             Err(error) => {
@@ -796,4 +828,70 @@ async fn filename_taken(pool: &sqlx::SqlitePool, saved_dir: &Path, filename: &st
 
     // Also check filesystem in case of orphaned files
     saved_dir.join(filename).exists()
+}
+
+// ---------------------------------------------------------------------------
+// Portal upload — persist bytes directly (no URL download)
+// ---------------------------------------------------------------------------
+
+/// Save raw bytes from a portal upload to `workspace/saved/` and insert a
+/// record into `saved_attachments`. Used by the portal attachment upload
+/// endpoint where the file is already in memory (no URL to download from).
+pub async fn persist_attachment_bytes(
+    pool: &sqlx::SqlitePool,
+    channel_id: &str,
+    saved_dir: &Path,
+    original_filename: &str,
+    mime_type: &str,
+    bytes: &[u8],
+) -> anyhow::Result<SavedAttachmentMeta> {
+    let safe_name = sanitize_filename(original_filename)
+        .map_err(|e| anyhow::anyhow!("unsafe filename: {e}"))?;
+
+    tokio::fs::create_dir_all(saved_dir).await?;
+
+    let saved_filename = deduplicate_filename(pool, saved_dir, &safe_name)
+        .await
+        .map_err(|e| anyhow::anyhow!("filename dedup failed: {e}"))?;
+    let disk_path = saved_dir.join(&saved_filename);
+
+    write_file_atomic(&disk_path, bytes)
+        .await
+        .map_err(|e| anyhow::anyhow!("write failed: {e}"))?;
+
+    let id = uuid::Uuid::new_v4().to_string();
+    let size_bytes = bytes.len() as u64;
+    let disk_path_str = disk_path.to_string_lossy().to_string();
+
+    sqlx::query(
+        "INSERT INTO saved_attachments \
+         (id, channel_id, original_filename, saved_filename, mime_type, size_bytes, disk_path) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(channel_id)
+    .bind(original_filename)
+    .bind(&saved_filename)
+    .bind(mime_type)
+    .bind(size_bytes as i64)
+    .bind(&disk_path_str)
+    .execute(pool)
+    .await?;
+
+    tracing::info!(
+        attachment_id = %id,
+        original = %original_filename,
+        saved = %saved_filename,
+        size = size_bytes,
+        channel_id,
+        "persisted portal upload attachment"
+    );
+
+    Ok(SavedAttachmentMeta {
+        id,
+        filename: original_filename.to_string(),
+        saved_filename,
+        mime_type: mime_type.to_string(),
+        size_bytes,
+    })
 }

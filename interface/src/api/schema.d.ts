@@ -3347,6 +3347,13 @@ export interface components {
             sender_name?: string | null;
             /** @enum {string} */
             type: "message";
+            attachments?: Array<{
+                id: string;
+                filename: string;
+                saved_filename: string;
+                mime_type: string;
+                size_bytes: number;
+            }>;
         } | {
             completed_at?: string | null;
             conclusion?: string | null;

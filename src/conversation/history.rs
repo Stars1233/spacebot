@@ -254,6 +254,8 @@ pub enum TimelineItem {
         sender_id: Option<String>,
         content: String,
         created_at: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        attachments: Vec<crate::agent::channel_attachments::SavedAttachmentMeta>,
     },
     BranchRun {
         id: String,
@@ -738,17 +740,17 @@ impl ProcessRunLogger {
 
         let query_str = format!(
             "SELECT * FROM ( \
-                SELECT 'message' AS item_type, id, role, sender_name, sender_id, content, \
+                SELECT 'message' AS item_type, id, role, sender_name, sender_id, content, metadata, \
                        NULL AS description, NULL AS conclusion, NULL AS task, NULL AS result, NULL AS status, \
                        created_at AS timestamp, NULL AS completed_at \
                 FROM conversation_messages WHERE channel_id = ?1 \
                 UNION ALL \
-                SELECT 'branch_run' AS item_type, id, NULL, NULL, NULL, NULL, \
+                SELECT 'branch_run' AS item_type, id, NULL, NULL, NULL, NULL, NULL AS metadata, \
                        description, conclusion, NULL, NULL, NULL, \
                        started_at AS timestamp, completed_at \
                 FROM branch_runs WHERE channel_id = ?1 \
                 UNION ALL \
-                SELECT 'worker_run' AS item_type, id, NULL, NULL, NULL, NULL, \
+                SELECT 'worker_run' AS item_type, id, NULL, NULL, NULL, NULL, NULL AS metadata, \
                        NULL, NULL, task, result, status, \
                        started_at AS timestamp, completed_at \
                 FROM worker_runs WHERE channel_id = ?1 \
@@ -771,17 +773,31 @@ impl ProcessRunLogger {
             .filter_map(|row| {
                 let item_type: String = row.try_get("item_type").ok()?;
                 match item_type.as_str() {
-                    "message" => Some(TimelineItem::Message {
-                        id: row.try_get("id").unwrap_or_default(),
-                        role: row.try_get("role").unwrap_or_default(),
-                        sender_name: row.try_get("sender_name").ok(),
-                        sender_id: row.try_get("sender_id").ok(),
-                        content: row.try_get("content").unwrap_or_default(),
-                        created_at: row
-                            .try_get::<chrono::DateTime<chrono::Utc>, _>("timestamp")
-                            .map(|t| t.to_rfc3339())
-                            .unwrap_or_default(),
-                    }),
+                    "message" => {
+                        let metadata_json: Option<String> = row.try_get("metadata").ok().flatten();
+                        let attachments = metadata_json
+                            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok())
+                            .and_then(|v| v.get("attachments").cloned())
+                            .and_then(|a| {
+                                serde_json::from_value::<
+                                    Vec<crate::agent::channel_attachments::SavedAttachmentMeta>,
+                                >(a)
+                                .ok()
+                            })
+                            .unwrap_or_default();
+                        Some(TimelineItem::Message {
+                            id: row.try_get("id").unwrap_or_default(),
+                            role: row.try_get("role").unwrap_or_default(),
+                            sender_name: row.try_get("sender_name").ok().flatten(),
+                            sender_id: row.try_get("sender_id").ok().flatten(),
+                            content: row.try_get("content").unwrap_or_default(),
+                            created_at: row
+                                .try_get::<chrono::DateTime<chrono::Utc>, _>("timestamp")
+                                .map(|t| t.to_rfc3339())
+                                .unwrap_or_default(),
+                            attachments,
+                        })
+                    }
                     "branch_run" => Some(TimelineItem::BranchRun {
                         id: row.try_get("id").unwrap_or_default(),
                         description: row.try_get("description").unwrap_or_default(),

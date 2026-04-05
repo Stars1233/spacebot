@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { usePortal, getPortalSessionId } from "@/hooks/usePortal";
 import { useLiveContext } from "@/hooks/useLiveContext";
@@ -23,6 +23,9 @@ export function PortalPanel({ agentId }: PortalPanelProps) {
 	const [showSettings, setShowSettings] = useState(false);
 	const [showHistory, setShowHistory] = useState(false);
 	const [settings, setSettings] = useState<ConversationSettings>({});
+	const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+	// Track uploaded attachment IDs keyed by file name+size for deduplication.
+	const uploadedIds = useRef<Map<string, string>>(new Map());
 
 	// Fetch conversations list
 	const { data: conversationsData } = useQuery({
@@ -146,11 +149,46 @@ export function PortalPanel({ agentId }: PortalPanelProps) {
 		},
 	});
 
-	const handleSubmit = () => {
+	const handleAddFiles = (files: File[]) => {
+		setPendingFiles((prev) => [...prev, ...files]);
+	};
+
+	const handleRemoveFile = (index: number) => {
+		setPendingFiles((prev) => prev.filter((_, i) => i !== index));
+	};
+
+	const handleSubmit = async () => {
 		const trimmed = input.trim();
 		if (!trimmed || isSending) return;
 		setInput("");
-		sendMessage(trimmed);
+
+		// Upload any pending files and collect their IDs.
+		let attachmentIds: string[] = [];
+		if (pendingFiles.length > 0) {
+			const filesToUpload = pendingFiles;
+			setPendingFiles([]);
+
+			const ids = await Promise.all(
+				filesToUpload.map(async (file) => {
+					const key = `${file.name}:${file.size}`;
+					const cached = uploadedIds.current.get(key);
+					if (cached) return cached;
+
+					try {
+						const response = await api.uploadAttachment(agentId, activeConversationId, file);
+						if (!response.ok) return null;
+						const data: { id: string } = await response.json();
+						uploadedIds.current.set(key, data.id);
+						return data.id;
+					} catch {
+						return null;
+					}
+				}),
+			);
+			attachmentIds = ids.filter((id): id is string => id !== null);
+		}
+
+		sendMessage(trimmed, attachmentIds.length > 0 ? attachmentIds : undefined);
 	};
 
 	const modelLabel = defaults
@@ -197,7 +235,7 @@ export function PortalPanel({ agentId }: PortalPanelProps) {
 								agentName={agentDisplayName}
 								draft={input}
 								onDraftChange={setInput}
-								onSend={handleSubmit}
+								onSend={() => void handleSubmit()}
 								disabled={isSending || isTyping}
 								modelOptions={defaults?.available_models ?? []}
 								selectedModel={settings.model || defaults?.model || ""}
@@ -205,6 +243,9 @@ export function PortalPanel({ agentId }: PortalPanelProps) {
 								projectOptions={projectOptions}
 								selectedProject={selectedProject}
 								onSelectProject={setSelectedProject}
+								pendingFiles={pendingFiles}
+								onAddFiles={handleAddFiles}
+								onRemoveFile={handleRemoveFile}
 							/>
 						</div>
 					</div>
@@ -229,7 +270,7 @@ export function PortalPanel({ agentId }: PortalPanelProps) {
 									agentName={agentDisplayName}
 									draft={input}
 									onDraftChange={setInput}
-									onSend={handleSubmit}
+									onSend={() => void handleSubmit()}
 									disabled={isSending || isTyping}
 									modelOptions={defaults?.available_models ?? []}
 									selectedModel={settings.model || defaults?.model || ""}
@@ -237,6 +278,9 @@ export function PortalPanel({ agentId }: PortalPanelProps) {
 									projectOptions={projectOptions}
 									selectedProject={selectedProject}
 									onSelectProject={setSelectedProject}
+									pendingFiles={pendingFiles}
+									onAddFiles={handleAddFiles}
+									onRemoveFile={handleRemoveFile}
 								/>
 							</div>
 						</div>

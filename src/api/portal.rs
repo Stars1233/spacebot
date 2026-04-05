@@ -2,7 +2,7 @@
 
 use super::state::ApiState;
 use crate::{
-    InboundMessage, MessageContent,
+    Attachment, InboundMessage, MessageContent,
     conversation::{
         ConversationDefaultsResponse, ConversationSettings, DelegationMode, MemoryMode,
         ModelOption, PortalConversation, PortalConversationStore, PortalConversationSummary,
@@ -24,6 +24,9 @@ pub(super) struct PortalSendRequest {
     #[serde(default = "default_sender_name")]
     sender_name: String,
     message: String,
+    /// IDs of pre-uploaded attachments to include with this message.
+    #[serde(default)]
+    attachment_ids: Vec<String>,
 }
 
 fn default_sender_name() -> String {
@@ -160,6 +163,77 @@ pub(super) async fn portal_send(
         serde_json::Value::String(request.sender_name.clone()),
     );
 
+    // Resolve pre-uploaded attachments from saved_attachments table.
+    let attachments: Vec<Attachment> = if request.attachment_ids.is_empty() {
+        Vec::new()
+    } else {
+        use sqlx::Row as _;
+        let pools = state.agent_pools.load();
+        let pool = pools.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+
+        let mut resolved = Vec::with_capacity(request.attachment_ids.len());
+        let mut attachment_metas: Vec<crate::agent::channel_attachments::SavedAttachmentMeta> =
+            Vec::with_capacity(request.attachment_ids.len());
+        for attachment_id in &request.attachment_ids {
+            let row = sqlx::query(
+                "SELECT id, original_filename, saved_filename, mime_type, size_bytes, disk_path \
+                 FROM saved_attachments WHERE id = ?",
+            )
+            .bind(attachment_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "failed to look up attachment");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+
+            if let Some(row) = row {
+                let disk_path_str: String = row.try_get("disk_path").unwrap_or_default();
+                let id: String = row.try_get("id").unwrap_or_default();
+                let filename: String = row.try_get("original_filename").unwrap_or_default();
+                let saved_filename: String = row.try_get("saved_filename").unwrap_or_default();
+                let mime_type: String = row.try_get("mime_type").unwrap_or_default();
+                let size_bytes: u64 = row
+                    .try_get::<i64, _>("size_bytes")
+                    .ok()
+                    .map(|n| n as u64)
+                    .unwrap_or(0);
+                attachment_metas.push(crate::agent::channel_attachments::SavedAttachmentMeta {
+                    id: id.clone(),
+                    filename: filename.clone(),
+                    saved_filename,
+                    mime_type: mime_type.clone(),
+                    size_bytes,
+                });
+                resolved.push(Attachment {
+                    filename,
+                    mime_type,
+                    url: String::new(),
+                    size_bytes: Some(size_bytes),
+                    auth_header: None,
+                    pre_saved_id: Some(id),
+                    disk_path: Some(std::path::PathBuf::from(disk_path_str)),
+                });
+            }
+        }
+        if !attachment_metas.is_empty() {
+            metadata.insert(
+                "portal_attachment_metas".into(),
+                serde_json::to_value(&attachment_metas).unwrap_or_default(),
+            );
+        }
+        resolved
+    };
+
+    let content = if attachments.is_empty() {
+        MessageContent::Text(request.message)
+    } else {
+        MessageContent::Media {
+            text: Some(request.message),
+            attachments,
+        }
+    };
+
     let inbound = InboundMessage {
         id: uuid::Uuid::new_v4().to_string(),
         source: "portal".into(),
@@ -167,7 +241,7 @@ pub(super) async fn portal_send(
         conversation_id,
         sender_id: request.sender_name.clone(),
         agent_id: Some(request.agent_id.into()),
-        content: MessageContent::Text(request.message),
+        content,
         timestamp: chrono::Utc::now(),
         metadata,
         formatted_author: Some(request.sender_name),

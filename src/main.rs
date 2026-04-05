@@ -2459,12 +2459,18 @@ async fn run(
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_string())
                     });
+                    let inbound_attachments: Vec<spacebot::agent::channel_attachments::SavedAttachmentMeta> =
+                        message.metadata
+                            .get("portal_attachment_metas")
+                            .and_then(|v| serde_json::from_value(v.clone()).ok())
+                            .unwrap_or_default();
                     api_state.event_tx.send(spacebot::api::ApiEvent::InboundMessage {
                         agent_id: agent_id.to_string(),
                         channel_id: conversation_id.clone(),
                         sender_name,
                         sender_id: message.sender_id.clone(),
                         text: message.content.to_string(),
+                        attachments: inbound_attachments,
                     }).ok();
 
                     if let Err(error) = message_tx.send(message).await {

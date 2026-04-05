@@ -331,7 +331,7 @@ impl Default for ResolvedConversationSettings {
             memory: MemoryMode::Full,
             delegation: DelegationMode::Standard,
             response_mode: ResponseMode::Active,
-            save_attachments: false,
+            save_attachments: true,
             worker_context: WorkerContextMode::default(),
         }
     }

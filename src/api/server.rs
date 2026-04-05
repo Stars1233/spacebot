@@ -2,9 +2,9 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, factory, ingest, links, mcp, memories,
-    messaging, models, notifications, opencode_proxy, portal, projects, providers, secrets,
-    settings, skills, ssh, system, tasks, tools, workers,
+    agents, attachments, bindings, channels, config, cortex, cron, factory, ingest, links, mcp,
+    memories, messaging, models, notifications, opencode_proxy, portal, projects, providers,
+    secrets, settings, skills, ssh, system, tasks, tools, workers,
 };
 
 use axum::Json;
@@ -125,10 +125,8 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(cron::trigger_cron))
         .routes(routes!(cron::toggle_cron))
         // Notification routes
-        .routes(routes!(
-            notifications::list_notifications,
-            notifications::unread_count
-        ))
+        .routes(routes!(notifications::list_notifications))
+        .routes(routes!(notifications::unread_count))
         .routes(routes!(notifications::mark_read))
         .routes(routes!(notifications::dismiss_notification))
         .routes(routes!(notifications::mark_all_read))
@@ -237,6 +235,10 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(portal::update_portal_conversation))
         .routes(routes!(portal::delete_portal_conversation))
         .routes(routes!(portal::conversation_defaults))
+        // Attachment routes
+        .routes(routes!(attachments::upload_attachment))
+        .routes(routes!(attachments::serve_attachment))
+        .routes(routes!(attachments::list_attachments))
         // Link routes
         .routes(routes!(links::list_links, links::create_link))
         .routes(routes!(links::update_link, links::delete_link))

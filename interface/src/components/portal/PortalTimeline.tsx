@@ -1,8 +1,139 @@
 import {useEffect, useRef} from "react";
 import {useQuery} from "@tanstack/react-query";
-import {MessageBubble} from "@spacedrive/ai";
-import {api, type TimelineItem, type WorkerListItem} from "@/api/client";
+import {Markdown, MessageBubble} from "@spacedrive/ai";
+import {File as FileIcon} from "@phosphor-icons/react";
+import {api, type AttachmentMeta, type TimelineItem, type WorkerListItem} from "@/api/client";
 import {PortalWorkerCard} from "./PortalWorkerCard";
+import clsx from "clsx";
+
+function formatFileSize(bytes: number): string {
+	if (bytes < 1024) return `${bytes} B`;
+	if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** User message bubble with attachments rendered inline at the top. */
+function UserMessageWithAttachments({
+	content,
+	attachments,
+	agentId,
+}: {
+	content: string;
+	attachments: AttachmentMeta[];
+	agentId: string;
+}) {
+	const images = attachments.filter((a) => a.mime_type.startsWith("image/"));
+	const files = attachments.filter((a) => !a.mime_type.startsWith("image/"));
+
+	return (
+		<div className="group flex flex-col items-end py-2">
+			<div className="max-w-[80%] overflow-hidden rounded-2xl bg-accent text-sm leading-6 text-white">
+				{images.length > 0 && (
+					<div className={clsx(images.length === 1 ? "" : "grid grid-cols-2 gap-px")}>
+						{images.map((att) => (
+							<a
+								key={att.id}
+								href={api.attachmentUrl(agentId, att.id)}
+								target="_blank"
+								rel="noopener noreferrer"
+							>
+								<img
+									src={api.attachmentUrl(agentId, att.id)}
+									alt={att.filename}
+									className="max-h-72 w-full object-cover"
+									loading="lazy"
+								/>
+							</a>
+						))}
+					</div>
+				)}
+				{files.length > 0 && (
+					<div className="flex flex-wrap gap-1.5 px-3 pt-2.5">
+						{files.map((att) => (
+							<a
+								key={att.id}
+								href={api.attachmentUrl(agentId, att.id, {download: true})}
+								download={att.filename}
+								className="flex items-center gap-1.5 rounded-md bg-white/20 px-2 py-1 text-xs transition-colors hover:bg-white/30"
+							>
+								<FileIcon size={12} className="flex-shrink-0" />
+								<span className="max-w-[160px] truncate">{att.filename}</span>
+								<span className="opacity-70">{formatFileSize(att.size_bytes)}</span>
+							</a>
+						))}
+					</div>
+				)}
+				{content && (
+					<div
+						className={clsx(
+							"px-4 py-2 whitespace-pre-wrap break-words",
+							(images.length > 0 || files.length > 0) && "pt-1.5",
+						)}
+					>
+						{content}
+					</div>
+				)}
+			</div>
+		</div>
+	);
+}
+
+/** Attachments shown below an assistant message, inline with the thread. */
+function AssistantAttachments({
+	agentId,
+	attachments,
+}: {
+	agentId: string;
+	attachments: AttachmentMeta[];
+}) {
+	if (attachments.length === 0) return null;
+
+	const images = attachments.filter((a) => a.mime_type.startsWith("image/"));
+	const files = attachments.filter((a) => !a.mime_type.startsWith("image/"));
+
+	return (
+		<div className="mt-2 flex flex-col gap-2">
+			{images.length > 0 && (
+				<div className={clsx("flex flex-wrap gap-2")}>
+					{images.map((att) => (
+						<a
+							key={att.id}
+							href={api.attachmentUrl(agentId, att.id)}
+							target="_blank"
+							rel="noopener noreferrer"
+							className="block overflow-hidden rounded-lg"
+						>
+							<img
+								src={api.attachmentUrl(agentId, att.id)}
+								alt={att.filename}
+								className="max-h-64 max-w-xs rounded-lg object-cover"
+								loading="lazy"
+							/>
+						</a>
+					))}
+				</div>
+			)}
+			{files.length > 0 && (
+				<div className="flex flex-wrap gap-2">
+					{files.map((att) => (
+						<a
+							key={att.id}
+							href={api.attachmentUrl(agentId, att.id, {download: true})}
+							download={att.filename}
+							className="border-app-line bg-app-box hover:bg-app-box/80 flex items-center gap-2 rounded-lg border px-3 py-2 text-sm transition-colors"
+						>
+							<FileIcon size={16} className="text-ink-faint flex-shrink-0" />
+							<div className="min-w-0">
+								<div className="text-ink max-w-[200px] truncate">{att.filename}</div>
+								<div className="text-ink-faint text-xs">{formatFileSize(att.size_bytes)}</div>
+							</div>
+						</a>
+					))}
+				</div>
+			)}
+		</div>
+	);
+}
 
 interface PortalTimelineProps {
 	agentId: string;
@@ -109,13 +240,28 @@ export function PortalTimeline({
 			<div className="mx-auto flex max-w-3xl flex-col gap-2 px-4 py-6 pb-[180px]">
 				{visibleItems.map((item) => {
 					if (item.type === "message") {
+						const attachments = item.attachments ?? [];
+						if (item.role === "user" && attachments.length > 0) {
+							return (
+								<UserMessageWithAttachments
+									key={item.id}
+									content={item.content}
+									attachments={attachments}
+									agentId={agentId}
+								/>
+							);
+						}
 						return (
-							<MessageBubble
-								key={item.id}
-								content={item.content}
-								isUser={item.role === "user"}
-								onCopy={(content) => void copyMessage(content)}
-							/>
+							<div key={item.id}>
+								<MessageBubble
+									content={item.content}
+									isUser={item.role === "user"}
+									onCopy={(content) => void copyMessage(content)}
+								/>
+								{attachments.length > 0 && (
+									<AssistantAttachments agentId={agentId} attachments={attachments} />
+								)}
+							</div>
 						);
 					}
 					if (item.type === "worker_run") {

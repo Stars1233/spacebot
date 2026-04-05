@@ -108,6 +108,7 @@ export interface InboundMessageEvent {
 	sender_name?: string | null;
 	sender_id: string;
 	text: string;
+	attachments?: AttachmentMeta[];
 }
 
 export interface OutboundMessageEvent {
@@ -266,6 +267,14 @@ export type ApiEvent =
 
 // -- Timeline types (discriminated union parts) --
 
+export interface AttachmentMeta {
+	id: string;
+	filename: string;
+	saved_filename: string;
+	mime_type: string;
+	size_bytes: number;
+}
+
 export interface TimelineMessage {
 	type: "message";
 	id: string;
@@ -274,6 +283,7 @@ export interface TimelineMessage {
 	sender_id: string | null;
 	content: string;
 	created_at: string;
+	attachments?: AttachmentMeta[];
 }
 
 export interface TimelineBranchRun {
@@ -2081,8 +2091,35 @@ export const api = {
 		}
 	},
 
+	// Attachment API
+	uploadAttachment: (agentId: string, channelId: string, file: File) => {
+		const form = new FormData();
+		form.append("file", file, file.name);
+		return fetch(
+			`${getApiBase()}/agents/${encodeURIComponent(agentId)}/channels/${encodeURIComponent(channelId)}/attachments/upload`,
+			{ method: "POST", body: form },
+		);
+	},
+
+	attachmentUrl: (agentId: string, attachmentId: string, opts?: { thumbnail?: boolean; download?: boolean }) => {
+		const params = new URLSearchParams();
+		if (opts?.thumbnail) params.set("thumbnail", "true");
+		if (opts?.download) params.set("download", "true");
+		const qs = params.toString();
+		return `${getApiBase()}/agents/${encodeURIComponent(agentId)}/attachments/${encodeURIComponent(attachmentId)}${qs ? `?${qs}` : ""}`;
+	},
+
+	listAttachments: (agentId: string, channelId: string, params?: { message_id?: string; limit?: number }) => {
+		const search = new URLSearchParams();
+		if (params?.message_id) search.set("message_id", params.message_id);
+		if (params?.limit) search.set("limit", String(params.limit));
+		return fetchJson<{ attachments: Array<{ id: string; original_filename: string; mime_type: string; size_bytes: number; created_at: string }> }>(
+			`/agents/${encodeURIComponent(agentId)}/channels/${encodeURIComponent(channelId)}/attachments${search.toString() ? `?${search}` : ""}`,
+		);
+	},
+
 	// Portal API (renamed from webchat)
-	portalSend: (agentId: string, sessionId: string, message: string, senderName?: string) =>
+	portalSend: (agentId: string, sessionId: string, message: string, senderName?: string, attachmentIds?: string[]) =>
 		fetch(`${getApiBase()}/portal/send`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -2091,6 +2128,7 @@ export const api = {
 				session_id: sessionId,
 				sender_name: senderName ?? "user",
 				message,
+				...(attachmentIds?.length ? { attachment_ids: attachmentIds } : {}),
 			}),
 		}),
 

@@ -940,7 +940,7 @@ impl Default for BrowserConfig {
 }
 
 /// Channel behavior configuration.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct ChannelConfig {
     /// Deprecated: use `response_mode` instead. Kept for backwards compatibility.
     pub listen_only_mode: bool,
@@ -950,6 +950,16 @@ pub struct ChannelConfig {
     /// `workspace/saved/` and tracked in the `saved_attachments` table so
     /// they can be recalled on later turns.
     pub save_attachments: bool,
+}
+
+impl Default for ChannelConfig {
+    fn default() -> Self {
+        Self {
+            listen_only_mode: false,
+            response_mode: None,
+            save_attachments: true,
+        }
+    }
 }
 
 /// OpenCode subprocess worker configuration.

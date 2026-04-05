@@ -240,6 +240,9 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 			sender_id: event.sender_id,
 			content: event.text,
 			created_at: new Date().toISOString(),
+			...(event.attachments && event.attachments.length > 0
+				? {attachments: event.attachments}
+				: {}),
 		});
 	}, [pushItem]);
 
