@@ -270,6 +270,14 @@ export function OpenCodeEmbed({
 					header:has(#opencode-titlebar-center),
 					[data-session-title] { display: none !important; }
 					main { border: none !important; border-radius: 0 !important; }
+					/* Give the prompt input a background matching SpaceUI's ChatComposer
+					   (bg-app-box/70 + rounded). OpenCode doesn't style it by default,
+					   so it renders transparent against the app background. */
+					[data-component="prompt-input"] {
+						background: color-mix(in srgb, var(--color-app-box) 70%, transparent) !important;
+						border: 1px solid var(--color-app-line) !important;
+						border-radius: 12px !important;
+					}
 				`;
 				shadow.appendChild(overrides);
 

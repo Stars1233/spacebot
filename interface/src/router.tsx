@@ -3,6 +3,7 @@ import {
 	createRootRoute,
 	createRoute,
 	Outlet,
+	useLocation,
 } from "@tanstack/react-router";
 import {BASE_PATH} from "@/api/client";
 import {ConnectionBanner} from "@/components/ConnectionBanner";
@@ -30,6 +31,8 @@ import {useLiveContext} from "@/hooks/useLiveContext";
 
 function RootLayout() {
 	const {liveStates, connectionState, hasData} = useLiveContext();
+	const location = useLocation();
+	const bare = location.pathname.startsWith("/workbench");
 
 	return (
 		<div className="flex h-screen flex-col overflow-hidden bg-sidebar">
@@ -37,9 +40,13 @@ function RootLayout() {
 			<div className="flex min-h-0 flex-1">
 				<Sidebar liveStates={liveStates} />
 				<div className="flex min-w-0 flex-1 flex-col overflow-hidden pt-[10px]">
-					<div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-tl-2xl border border-app-line bg-app">
+					{bare ? (
 						<Outlet />
-					</div>
+					) : (
+						<div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-tl-2xl border border-app-line bg-app">
+							<Outlet />
+						</div>
+					)}
 				</div>
 			</div>
 		</div>
