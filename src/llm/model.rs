@@ -3438,6 +3438,15 @@ fn parse_openai_responses_response(
         .as_array()
         .ok_or_else(|| CompletionError::ResponseError("missing output array".into()))?;
 
+    if output_items.is_empty() {
+        tracing::warn!(
+            provider = %provider_label,
+            status = body["status"].as_str().unwrap_or("unknown"),
+            body = %serde_json::to_string_pretty(&body).unwrap_or_default(),
+            "responses API returned empty output array — dumping full body"
+        );
+    }
+
     let mut assistant_content = Vec::new();
     let mut fallback_text_parts = Vec::new();
 
@@ -3547,6 +3556,28 @@ fn parse_openai_responses_sse_response(
     response_text: &str,
     provider_label: &str,
 ) -> Result<serde_json::Value, CompletionError> {
+    // The `response.completed` event may have an empty `output` array when the
+    // ChatGPT Responses API streams content incrementally.  We accumulate
+    // output items from the delta events and patch them into the completed
+    // response if needed.
+    use serde_json::Value;
+    use std::collections::BTreeMap;
+
+    // output_index → { item skeleton + accumulated text parts keyed by content_index }
+    struct OutputItemAcc {
+        /// The full item snapshot from `response.output_item.done`, if received.
+        done_snapshot: Option<Value>,
+        /// Accumulated text per content_index from delta events.
+        text_parts: BTreeMap<usize, String>,
+        /// Item type from `response.output_item.added`.
+        item_type: Option<String>,
+        /// The skeleton from `response.output_item.added`.
+        added_skeleton: Option<Value>,
+    }
+
+    let mut output_acc: BTreeMap<usize, OutputItemAcc> = BTreeMap::new();
+    let mut completed_response: Option<Value> = None;
+
     for line in response_text.lines() {
         let Some(data) = line.strip_prefix("data: ") else {
             continue;
@@ -3556,21 +3587,99 @@ fn parse_openai_responses_sse_response(
             continue;
         }
 
-        let Ok(event_body) = serde_json::from_str::<serde_json::Value>(data) else {
+        let Ok(event_body) = serde_json::from_str::<Value>(data) else {
             continue;
         };
 
-        if event_body["type"].as_str() == Some("response.completed")
-            && let Some(response) = event_body.get("response")
-        {
-            return Ok(response.clone());
+        match event_body["type"].as_str() {
+            Some("response.output_item.added") => {
+                let idx = event_body["output_index"].as_u64().unwrap_or(0) as usize;
+                let item = &event_body["item"];
+                let entry = output_acc.entry(idx).or_insert_with(|| OutputItemAcc {
+                    done_snapshot: None,
+                    text_parts: BTreeMap::new(),
+                    item_type: None,
+                    added_skeleton: None,
+                });
+                entry.item_type = item["type"].as_str().map(String::from);
+                entry.added_skeleton = Some(item.clone());
+            }
+            Some("response.output_text.delta") => {
+                let idx = event_body["output_index"].as_u64().unwrap_or(0) as usize;
+                let content_idx =
+                    event_body["content_index"].as_u64().unwrap_or(0) as usize;
+                let delta = event_body["delta"].as_str().unwrap_or("");
+                let entry = output_acc.entry(idx).or_insert_with(|| OutputItemAcc {
+                    done_snapshot: None,
+                    text_parts: BTreeMap::new(),
+                    item_type: None,
+                    added_skeleton: None,
+                });
+                entry.text_parts.entry(content_idx).or_default().push_str(delta);
+            }
+            Some("response.output_item.done") => {
+                let idx = event_body["output_index"].as_u64().unwrap_or(0) as usize;
+                let entry = output_acc.entry(idx).or_insert_with(|| OutputItemAcc {
+                    done_snapshot: None,
+                    text_parts: BTreeMap::new(),
+                    item_type: None,
+                    added_skeleton: None,
+                });
+                entry.done_snapshot = event_body.get("item").cloned();
+            }
+            Some("response.function_call_arguments.delta") => {
+                // Function call deltas are handled by output_item.done snapshot
+            }
+            Some("response.completed") => {
+                completed_response = event_body.get("response").cloned();
+            }
+            _ => {}
         }
     }
 
-    Err(CompletionError::ProviderError(format!(
-        "{provider_label} Responses SSE stream missing response.completed event.\nBody: {}",
-        truncate_body(response_text)
-    )))
+    let mut response = completed_response.ok_or_else(|| {
+        CompletionError::ProviderError(format!(
+            "{provider_label} Responses SSE stream missing response.completed event.\nBody: {}",
+            truncate_body(response_text)
+        ))
+    })?;
+
+    // If the completed response has an empty output array, reconstruct from
+    // accumulated SSE events.
+    let output_is_empty = response["output"]
+        .as_array()
+        .map_or(true, |arr| arr.is_empty());
+
+    if output_is_empty && !output_acc.is_empty() {
+        let mut reconstructed: Vec<Value> = Vec::new();
+
+        for (_idx, acc) in output_acc {
+            // Prefer the done snapshot (complete item); fall back to
+            // reconstructing from deltas.
+            if let Some(snapshot) = acc.done_snapshot {
+                reconstructed.push(snapshot);
+            } else if !acc.text_parts.is_empty() {
+                // Build a message output item from accumulated text
+                let full_text: String =
+                    acc.text_parts.into_values().collect();
+                let content = serde_json::json!([{
+                    "type": "output_text",
+                    "text": full_text,
+                }]);
+                let mut item = acc
+                    .added_skeleton
+                    .unwrap_or_else(|| serde_json::json!({"type": "message", "role": "assistant"}));
+                item["content"] = content;
+                reconstructed.push(item);
+            }
+        }
+
+        if !reconstructed.is_empty() {
+            response["output"] = Value::Array(reconstructed);
+        }
+    }
+
+    Ok(response)
 }
 
 fn parse_openai_error_message(response_text: &str) -> Option<String> {

@@ -152,13 +152,11 @@ impl NotificationStore {
     }
 
     pub async fn get_by_id(&self, id: &str) -> Result<Notification> {
-        let row = sqlx::query(&format!(
-            "{SELECT_COLUMNS} FROM notifications WHERE id = ?"
-        ))
-        .bind(id)
-        .fetch_one(&self.pool)
-        .await
-        .context("failed to fetch notification by id")?;
+        let row = sqlx::query(&format!("{SELECT_COLUMNS} FROM notifications WHERE id = ?"))
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .context("failed to fetch notification by id")?;
 
         notification_from_row(row)
     }
@@ -271,8 +269,12 @@ impl NotificationStore {
 
 fn notification_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Notification> {
     Ok(Notification {
-        id: row.try_get("id").context("failed to read notification id")?,
-        kind: row.try_get("kind").context("failed to read notification kind")?,
+        id: row
+            .try_get("id")
+            .context("failed to read notification id")?,
+        kind: row
+            .try_get("kind")
+            .context("failed to read notification kind")?,
         severity: row
             .try_get("severity")
             .context("failed to read notification severity")?,

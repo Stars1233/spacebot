@@ -47,7 +47,7 @@ export function TokenUsageCard() {
 	const data = DATA_BY_PERIOD[period];
 
 	return (
-		<Card>
+		<Card variant="dark">
 			<CardHeader className="flex-row items-center justify-between p-4 pb-3">
 				<h2 className="font-plex text-sm font-medium text-ink-dull">
 					Token Usage

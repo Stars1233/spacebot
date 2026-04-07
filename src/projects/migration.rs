@@ -146,14 +146,13 @@ async fn migrate_agent_projects(
         let root_path: String = row.try_get("root_path").context("missing root_path")?;
 
         // Skip if this project (by id) or root_path already exists in instance DB.
-        let already_exists: bool = sqlx::query_scalar(
-            "SELECT COUNT(*) > 0 FROM projects WHERE id = ? OR root_path = ?",
-        )
-        .bind(&id)
-        .bind(&root_path)
-        .fetch_one(instance_pool)
-        .await
-        .unwrap_or(false);
+        let already_exists: bool =
+            sqlx::query_scalar("SELECT COUNT(*) > 0 FROM projects WHERE id = ? OR root_path = ?")
+                .bind(&id)
+                .bind(&root_path)
+                .fetch_one(instance_pool)
+                .await
+                .unwrap_or(false);
 
         if already_exists {
             continue;
@@ -165,7 +164,9 @@ async fn migrate_agent_projects(
         let tags: String = row.try_get("tags").unwrap_or_else(|_| "[]".to_string());
         let logo_path: Option<String> = row.try_get("logo_path").unwrap_or(None);
         let settings: String = row.try_get("settings").unwrap_or_else(|_| "{}".to_string());
-        let status: String = row.try_get("status").unwrap_or_else(|_| "active".to_string());
+        let status: String = row
+            .try_get("status")
+            .unwrap_or_else(|_| "active".to_string());
         let created_at: String = row.try_get("created_at").unwrap_or_default();
         let updated_at: String = row.try_get("updated_at").unwrap_or_default();
 

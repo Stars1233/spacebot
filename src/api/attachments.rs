@@ -101,10 +101,7 @@ pub(super) async fn upload_attachment(
         .map_err(|_| StatusCode::BAD_REQUEST)?
         .ok_or(StatusCode::BAD_REQUEST)?;
 
-    let original_filename = field
-        .file_name()
-        .unwrap_or("upload")
-        .to_string();
+    let original_filename = field.file_name().unwrap_or("upload").to_string();
 
     let content_type = field
         .content_type()
@@ -201,9 +198,15 @@ pub(super) async fn serve_attachment(
     })?;
 
     let disposition = if query.download {
-        format!("attachment; filename=\"{}\"", sanitize_header_value(&original_filename))
+        format!(
+            "attachment; filename=\"{}\"",
+            sanitize_header_value(&original_filename)
+        )
     } else {
-        format!("inline; filename=\"{}\"", sanitize_header_value(&original_filename))
+        format!(
+            "inline; filename=\"{}\"",
+            sanitize_header_value(&original_filename)
+        )
     };
 
     let response = Response::builder()

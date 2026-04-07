@@ -252,21 +252,25 @@ async fn dump_channel_context() {
         )),
         worker_context_settings: Arc::new(tokio::sync::RwLock::new(Default::default())),
         model_overrides: Arc::new(Default::default()),
+        cron_outcome: None,
     };
 
     let tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();
     let replied_flag = spacebot::tools::new_replied_flag();
+    let reply_target = spacebot::tools::ReplyTarget::Live(Box::new(response_tx.clone()));
     spacebot::tools::add_channel_tools(
         &tool_server,
         state,
         response_tx,
+        reply_target,
         "test-conversation",
         skip_flag,
         replied_flag,
         None,
         None,
         true,
+        None,
         None,
         None,
     )
@@ -496,20 +500,24 @@ async fn dump_all_contexts() {
         )),
         worker_context_settings: Arc::new(tokio::sync::RwLock::new(Default::default())),
         model_overrides: Arc::new(Default::default()),
+        cron_outcome: None,
     };
     let channel_tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();
     let replied_flag = spacebot::tools::new_replied_flag();
+    let reply_target = spacebot::tools::ReplyTarget::Live(Box::new(response_tx.clone()));
     spacebot::tools::add_channel_tools(
         &channel_tool_server,
         state,
         response_tx,
+        reply_target,
         "test",
         skip_flag,
         replied_flag,
         None,
         None,
         true,
+        None,
         None,
         None,
     )

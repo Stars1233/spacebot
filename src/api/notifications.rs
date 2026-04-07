@@ -46,9 +46,7 @@ pub(super) struct UnreadCountResponse {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn get_notification_store(
-    state: &ApiState,
-) -> Result<Arc<NotificationStore>, StatusCode> {
+fn get_notification_store(state: &ApiState) -> Result<Arc<NotificationStore>, StatusCode> {
     state
         .notification_store
         .load()

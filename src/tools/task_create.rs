@@ -49,8 +49,6 @@ pub struct TaskCreateArgs {
     pub subtasks: Vec<String>,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
-    #[serde(default)]
-    pub status: Option<String>,
 }
 
 fn default_priority() -> String {
@@ -94,11 +92,6 @@ impl Tool for TaskCreateTool {
                     "metadata": {
                         "type": "object",
                         "description": "Optional metadata object"
-                    },
-                    "status": {
-                        "type": "string",
-                        "enum": crate::tasks::TaskStatus::ALL.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                        "description": "Optional initial status"
                     }
                 },
                 "required": ["title"]
@@ -109,11 +102,7 @@ impl Tool for TaskCreateTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let priority = TaskPriority::parse(&args.priority)
             .ok_or_else(|| TaskCreateError(format!("invalid priority: {}", args.priority)))?;
-        let status = match args.status.as_deref() {
-            None => TaskStatus::Backlog,
-            Some(value) => TaskStatus::parse(value)
-                .ok_or_else(|| TaskCreateError(format!("invalid status: {value}")))?,
-        };
+        let status = TaskStatus::PendingApproval;
 
         let subtasks = args
             .subtasks

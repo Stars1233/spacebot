@@ -164,7 +164,9 @@ fn default_true() -> bool {
 /// create, delete, or scan. Best-effort — logs and continues on error.
 async fn refresh_sandbox(state: &ApiState) {
     let store_guard = state.project_store.load();
-    let Some(store) = store_guard.as_ref().as_ref() else { return };
+    let Some(store) = store_guard.as_ref().as_ref() else {
+        return;
+    };
     let sandboxes = state.sandboxes.load();
     for sandbox in sandboxes.values() {
         crate::projects::refresh_sandbox_project_paths(store, sandbox).await;
@@ -325,13 +327,10 @@ pub(super) async fn list_projects(
 
     let status = query.status.as_deref().and_then(ProjectStatus::parse);
 
-    let projects = store
-        .list_projects(status)
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "failed to list projects");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let projects = store.list_projects(status).await.map_err(|error| {
+        tracing::error!(%error, "failed to list projects");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(Json(ProjectListResponse { projects }))
 }
@@ -547,13 +546,10 @@ pub(super) async fn delete_project(
     let store_guard = state.project_store.load();
     let store = store_guard.as_ref().as_ref().ok_or(StatusCode::NOT_FOUND)?;
 
-    let deleted = store
-        .delete_project(&project_id)
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, "failed to delete project");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let deleted = store.delete_project(&project_id).await.map_err(|error| {
+        tracing::error!(%error, "failed to delete project");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     if !deleted {
         return Err(StatusCode::NOT_FOUND);
@@ -650,10 +646,7 @@ pub(super) async fn scan_project(
 
     // Re-detect project logo.
     let logo = crate::projects::detect_logo(&root);
-    if let Err(error) = store
-        .set_logo_path(&project_id, logo.as_deref())
-        .await
-    {
+    if let Err(error) = store.set_logo_path(&project_id, logo.as_deref()).await {
         tracing::warn!(%error, "failed to update logo path during scan");
     }
 

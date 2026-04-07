@@ -43,7 +43,9 @@
 
 Spacebot is opinionated agent infrastructure, built for teams and usable by anyone. **State belongs in structured storage, not markdown files the LLM manages.** Memory lives in a typed graph in SQLite. Autonomy runs on a task state machine linked to goals, not a heartbeat.json. The LLM reasons. The system holds state.
 
-It works out of the box, scales from one person to a whole community, and gets better with use.
+**It gets smarter the more you use it.** After complex tasks, the agent captures what it learned as reusable skills. After conversations go idle, a background process silently saves skills and memories worth keeping. Every session builds on the last — without any user action.
+
+It works out of the box and scales from one person to a whole community.
 
 ---
 
@@ -131,12 +133,13 @@ Spacebot's memory is a typed, graph-connected knowledge system in SQLite and Lan
 
 ### Skills
 
-Extensible skill system integrated with [skills.sh](https://skills.sh):
+Skills are reusable procedures injected into worker system prompts. The agent writes them from experience — and they accumulate automatically over time.
 
-- **skills.sh registry** — install any skill from the public ecosystem with one command
+- **Autonomous skill capture** — when a channel identifies a workflow that required multiple steps or problem-solving, it delegates to a branch to write it as a skill. The skill loads into the next session and every session after
+- **Post-conversation reflection** — after a conversation goes idle, a background branch silently reviews the history and saves skills and memories worth keeping. No user action required
+- **AI-assisted authoring** — describe a skill in plain language, the agent generates it and shows a preview before saving
 - **Worker injection** — skills are injected into worker system prompts for specialized tasks
-- **Bundled resources** — scripts, references, and assets packaged with skills
-- **skills.sh compatible** — any skill from the public registry works out of the box
+- **skills.sh registry** — install any skill from the public ecosystem with one command. Compatible with any skill from the public registry
 
 ```bash
 spacebot skill add vercel-labs/agent-skills
@@ -166,19 +169,20 @@ Workers come loaded with tools for real work:
 
 ### Messaging
 
-Native adapters for Discord, Slack, Telegram, Twitch, and Webchat:
+Native adapters for Discord, Slack, Telegram, Twitch, Signal, Mattermost, Email, and Webchat, plus a generic Webhook receiver:
 
 - **Message coalescing** — rapid-fire messages are batched into a single LLM turn with timing context
 - **File attachments** — send and receive files, images, and documents. Attachments are saved to the workspace and recalled by ID
 - **Rich messages** — embeds/cards, interactive buttons, select menus, and polls (Discord). Block Kit and slash commands (Slack)
+- **Email** — IMAP polling + SMTP delivery with TLS, UID-based dedup, allowed sender filtering, and attachment limits. Works with local bridges like Proton Bridge
 - **Webchat** — embeddable portal chat with SSE streaming, per-agent session isolation
 - **Per-channel permissions** — guild, channel, and DM-level access control, hot-reloadable
 
 ### Model Routing
 
-Four-level routing picks the right model for every call. Channels get the best conversational model. Workers get something fast and cheap. Coding workers upgrade automatically. Simple user messages are downgraded to cheaper models by a sub-millisecond prompt scorer with no external calls.
+Four-level routing picks the right model for every call. Channels get the best conversational model. Workers get something fast and cheap. Coding workers upgrade automatically. Simple user messages are downgraded to cheaper models by a sub-millisecond prompt scorer with no external calls. Voice messages route to a dedicated voice model.
 
-Any OpenAI-compatible or Anthropic-compatible endpoint works, including Ollama for local models, Z.ai GLM models, Azure OpenAI, and custom providers. Built-in support for Kilo Gateway, NVIDIA, MiniMax, Moonshot AI, OpenCode Go, and more.
+Any OpenAI-compatible or Anthropic-compatible endpoint works, including Ollama for local models, Z.ai GLM models, Azure OpenAI, and custom providers. Built-in support for Kilo Gateway, NVIDIA, MiniMax, Moonshot AI, Gemini, GitHub Copilot, OpenCode Go, and more.
 
 ### MCP Integration
 
@@ -248,7 +252,7 @@ No other agent harness is building this. It's a category.
 ### Prerequisites
 
 - **Rust** 1.85+ ([rustup](https://rustup.rs/))
-- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Kilo Gateway, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, NVIDIA, MiniMax, Moonshot AI, OpenCode Zen, OpenCode Go), or use `spacebot auth login` for Anthropic OAuth
+- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Kilo Gateway, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, NVIDIA, MiniMax, Moonshot AI, Gemini, GitHub Copilot, OpenCode Zen, OpenCode Go), or use `spacebot auth login` for Anthropic OAuth
 
 ### Build and Run
 

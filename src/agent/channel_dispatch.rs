@@ -327,6 +327,11 @@ async fn spawn_branch(
         channel_id = %state.channel_id,
         description = %description,
     );
+    // Acquire the write lock before spawning so the event loop cannot process
+    // BranchResult (which also takes a write lock) before we insert the handle.
+    // Without this, a fast-completing branch sends BranchResult before the
+    // insert, causing `was_active` to be false and suppressing the retrigger.
+    let mut branches = state.active_branches.write().await;
     let handle = tokio::spawn(
         async move {
             if let Err(error) = branch.run(&prompt).await {
@@ -352,11 +357,8 @@ async fn spawn_branch(
         }
         .instrument(branch_span),
     );
-
-    {
-        let mut branches = state.active_branches.write().await;
-        branches.insert(branch_id, handle);
-    }
+    branches.insert(branch_id, handle);
+    drop(branches);
 
     {
         let mut status = state.status_block.write().await;

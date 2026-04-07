@@ -52,6 +52,7 @@ pub mod secret_set;
 pub mod send_agent_message;
 pub mod send_file;
 pub mod send_message_to_another_channel;
+pub mod set_outcome;
 pub mod set_status;
 pub mod shell;
 pub mod skills_search;
@@ -116,7 +117,9 @@ pub use project_manage::{
 };
 pub use react::{ReactArgs, ReactError, ReactOutput, ReactTool};
 pub use read_skill::{ReadSkillArgs, ReadSkillError, ReadSkillOutput, ReadSkillTool};
-pub use reply::{RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTool, new_replied_flag};
+pub use reply::{
+    RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTarget, ReplyTool, new_replied_flag,
+};
 pub use route::{RouteArgs, RouteError, RouteOutput, RouteTool};
 pub use secret_set::{SecretSetArgs, SecretSetError, SecretSetOutput, SecretSetTool};
 pub use send_agent_message::{
@@ -126,6 +129,7 @@ pub use send_file::{SendFileArgs, SendFileError, SendFileOutput, SendFileTool};
 pub use send_message_to_another_channel::{
     SendMessageArgs, SendMessageError, SendMessageOutput, SendMessageTool,
 };
+pub use set_outcome::{SetOutcomeArgs, SetOutcomeError, SetOutcomeOutput, SetOutcomeTool};
 pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTool, StatusKind};
 pub use shell::{EnvVar, ShellArgs, ShellError, ShellOutput, ShellResult, ShellTool};
 pub use skills_search::{
@@ -352,6 +356,7 @@ pub async fn add_channel_tools(
     handle: &ToolServerHandle,
     state: ChannelState,
     response_tx: RoutedSender,
+    reply_target: ReplyTarget,
     conversation_id: impl Into<String>,
     skip_flag: SkipFlag,
     replied_flag: RepliedFlag,
@@ -360,6 +365,7 @@ pub async fn add_channel_tools(
     allow_direct_reply: bool,
     current_adapter: Option<String>,
     slack_thread_ts: Option<&str>,
+    cron_outcome: Option<crate::cron::CronOutcome>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     let conversation_id = conversation_id.into();
 
@@ -372,7 +378,7 @@ pub async fn add_channel_tools(
             .unwrap_or_else(|| state.deps.agent_id.to_string());
         handle
             .add_tool(ReplyTool::new(
-                response_tx.clone(),
+                reply_target,
                 conversation_id.clone(),
                 state.conversation_logger.clone(),
                 state.channel_id.clone(),
@@ -409,9 +415,7 @@ pub async fn add_channel_tools(
         ))
         .await?;
     handle
-        .add_tool(ProjectManageTool::new(
-            state.deps.project_store.clone(),
-        ))
+        .add_tool(ProjectManageTool::new(state.deps.project_store.clone()))
         .await?;
     // Add attachment recall tool when save_attachments is enabled
     if state
@@ -446,6 +450,11 @@ pub async fn add_channel_tools(
         agent_msg = agent_msg.with_skip_flag(skip_flag.clone());
         handle.add_tool(agent_msg).await?;
     }
+    if let Some(outcome) = cron_outcome {
+        handle
+            .add_tool(SetOutcomeTool::new(outcome, conversation_id.clone()))
+            .await?;
+    }
     Ok(())
 }
 
@@ -456,6 +465,7 @@ pub async fn add_direct_mode_tools(
     handle: &ToolServerHandle,
     state: ChannelState,
     response_tx: RoutedSender,
+    reply_target: ReplyTarget,
     conversation_id: impl Into<String>,
     skip_flag: SkipFlag,
     replied_flag: RepliedFlag,
@@ -464,12 +474,14 @@ pub async fn add_direct_mode_tools(
     allow_direct_reply: bool,
     current_adapter: Option<String>,
     slack_thread_ts: Option<&str>,
+    cron_outcome: Option<crate::cron::CronOutcome>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     // First add all standard channel tools
     add_channel_tools(
         handle,
         state.clone(),
         response_tx.clone(),
+        reply_target,
         conversation_id,
         skip_flag.clone(),
         replied_flag.clone(),
@@ -478,6 +490,7 @@ pub async fn add_direct_mode_tools(
         allow_direct_reply,
         current_adapter.clone(),
         slack_thread_ts,
+        cron_outcome,
     )
     .await?;
 
@@ -547,6 +560,7 @@ pub async fn remove_channel_tools(
     let _ = handle.remove_tool(SendMessageTool::NAME).await;
     let _ = handle.remove_tool(SendAgentMessageTool::NAME).await;
     let _ = handle.remove_tool(AttachmentRecallTool::NAME).await;
+    let _ = handle.remove_tool(SetOutcomeTool::NAME).await;
     Ok(())
 }
 

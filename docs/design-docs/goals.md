@@ -133,13 +133,16 @@ What the goal review *can* do: set `notes` to "All linked tasks complete — rea
 ```
 goal_create → active
   ↓
-Goal review creates pending_approval tasks
+Autonomy channel wakes, sees goal with no tasks
+  → creates pending_approval tasks, updates goal notes
   ↓
 User approves tasks → backlog / ready
   ↓
-Autonomy channels execute tasks
+Autonomy channel executes tasks
+  → updates goal notes as progress is made
   ↓
-Goal review detects completion candidate → updates notes
+Autonomy channel detects all tasks complete
+  → sets notes: "All linked tasks complete — ready for your review"
   ↓
 User reviews → goal_update(status: "completed")  ← user-initiated
 ```
@@ -150,7 +153,7 @@ User reviews → goal_update(status: "completed")  ← user-initiated
 - `active → abandoned` — user drops the goal
 - `paused → active` — user resumes
 
-The goal review skips paused goals entirely. Autonomy channels always check the linked goal's status — if the goal is paused or abandoned, they should stop working on its tasks and flag this.
+The autonomy channel skips paused and abandoned goals entirely. When picking a task, it checks the linked goal's status — if the goal is paused or abandoned, the task is skipped and flagged.
 
 ---
 
@@ -172,17 +175,15 @@ The active goals list is visible in the channel context panel (same panel that s
 
 ## Relationship to Autonomy
 
-Goals don't drive execution directly — the task system does. Goals drive the goal review process, which creates tasks. Tasks drive autonomy channels.
-
-The relationship is:
+Goals don't drive execution directly — the task system does. The autonomy channel reads goals on each wake, uses them to inform which task to pick and what new tasks to create, and updates their notes as progress is made. There is no separate goal review process.
 
 ```
-Goals → Goal Review → pending_approval tasks → (user approves) → ready tasks → Autonomy Channels
+Goals → Autonomy Channel → pending_approval tasks → (user approves) → ready tasks → execution
 ```
 
-Goals are the "why." Tasks are the "what." Autonomy channels are the "how."
+Goals are the "why." Tasks are the "what." The autonomy channel is the "how."
 
-A goal without any tasks is a signal to the goal review process that work needs to be created. A goal with all tasks complete is a signal to the user that the objective may be met. In between, goals provide the orienting context that makes individual task work coherent.
+A goal without tasks is a signal the autonomy channel acts on — it creates `pending_approval` tasks toward the objective. A goal with all tasks complete is a signal the autonomy channel surfaces to the user via `notes`. In between, goals provide the orienting context that makes individual task work coherent.
 
 ---
 
@@ -196,10 +197,10 @@ A goal without any tasks is a signal to the goal review process that work needs 
 - API endpoints: CRUD for goals
 
 **Phase 2 — Autonomy Integration**
-- Goal review reads goals in extended format
-- Goal review uses `goal_id` when creating tasks
-- Autonomy channels receive linked goal in extended format
-- Goal review sets `notes` when completion candidate detected
+- Autonomy channel receives all active goals in extended format on wake
+- Autonomy channel uses `goal_id` when creating tasks from goals
+- Autonomy channel updates `notes` as progress is made
+- Autonomy channel sets `notes` when all linked tasks are complete
 
 **Phase 3 — UI**
 - Goals tab: list, create, detail panel, linked task counts

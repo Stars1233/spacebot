@@ -708,9 +708,7 @@ pub(super) async fn inspect_prompt(
         use crate::prompts::engine::{ProjectContext, ProjectRepoContext, ProjectWorktreeContext};
         let store = &channel_state.deps.project_store;
         let projects = store
-            .list_projects(
-                Some(crate::projects::ProjectStatus::Active),
-            )
+            .list_projects(Some(crate::projects::ProjectStatus::Active))
             .await
             .unwrap_or_default();
         if projects.is_empty() {

@@ -33,7 +33,7 @@ import {useLiveContext} from "@/hooks/useLiveContext";
 function RootLayout() {
 	const {liveStates, connectionState, hasData} = useLiveContext();
 	const location = useLocation();
-	const bare = location.pathname.startsWith("/workbench");
+	const bare = location.pathname.startsWith("/workbench") || location.pathname.startsWith("/dashboard");
 
 	return (
 		<div className="flex h-screen flex-col overflow-hidden bg-sidebar">

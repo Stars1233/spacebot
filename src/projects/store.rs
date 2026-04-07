@@ -228,18 +228,13 @@ impl ProjectStore {
         row.map(|r| row_to_project(&r)).transpose()
     }
 
-    pub async fn list_projects(
-        &self,
-        status: Option<ProjectStatus>,
-    ) -> Result<Vec<Project>> {
+    pub async fn list_projects(&self, status: Option<ProjectStatus>) -> Result<Vec<Project>> {
         let rows = if let Some(status) = status {
-            sqlx::query(
-                "SELECT * FROM projects WHERE status = ? ORDER BY updated_at DESC",
-            )
-            .bind(status.as_str())
-            .fetch_all(&self.pool)
-            .await
-            .context("failed to list projects")?
+            sqlx::query("SELECT * FROM projects WHERE status = ? ORDER BY updated_at DESC")
+                .bind(status.as_str())
+                .fetch_all(&self.pool)
+                .await
+                .context("failed to list projects")?
         } else {
             sqlx::query("SELECT * FROM projects ORDER BY updated_at DESC")
                 .fetch_all(&self.pool)
@@ -680,7 +675,12 @@ fn scan_for_logo(root: &Path, dir: &Path, depth: u8) -> Option<String> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         // Skip heavy/irrelevant dirs, but allow .github
-        if name == "node_modules" || name == "target" || name == ".git" || name == "dist" || name == "build" {
+        if name == "node_modules"
+            || name == "target"
+            || name == ".git"
+            || name == "dist"
+            || name == "build"
+        {
             continue;
         }
         if name.starts_with('.') && name != ".github" {
@@ -718,7 +718,6 @@ mod tests {
 
         let project = store
             .create_project(CreateProjectInput {
-
                 name: "Spacebot".into(),
                 description: "The Spacebot monorepo".into(),
                 icon: "".into(),
@@ -748,7 +747,6 @@ mod tests {
 
         let project = store
             .create_project(CreateProjectInput {
-
                 name: "Test".into(),
                 description: String::new(),
                 icon: String::new(),
@@ -804,7 +802,6 @@ mod tests {
 
         let project = store
             .create_project(CreateProjectInput {
-
                 name: "Test".into(),
                 description: String::new(),
                 icon: String::new(),
@@ -844,7 +841,6 @@ mod tests {
 
         let project = store
             .create_project(CreateProjectInput {
-
                 name: "Test".into(),
                 description: String::new(),
                 icon: String::new(),
@@ -907,7 +903,6 @@ mod tests {
 
         store
             .create_project(CreateProjectInput {
-
                 name: "First".into(),
                 description: String::new(),
                 icon: String::new(),
@@ -920,7 +915,6 @@ mod tests {
 
         let result = store
             .create_project(CreateProjectInput {
-
                 name: "Second".into(),
                 description: String::new(),
                 icon: String::new(),

@@ -43,8 +43,6 @@ pub(super) struct CreateTaskRequest {
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
     priority: Option<String>,
     #[serde(default)]
     subtasks: Vec<crate::tasks::TaskSubtask>,
@@ -266,8 +264,7 @@ pub(super) async fn create_task(
 ) -> Result<Json<TaskResponse>, StatusCode> {
     let store = get_task_store(&state)?;
 
-    let status =
-        parse_status(request.status.as_deref())?.unwrap_or(crate::tasks::TaskStatus::Backlog);
+    let status = crate::tasks::TaskStatus::PendingApproval;
     let priority =
         parse_priority(request.priority.as_deref())?.unwrap_or(crate::tasks::TaskPriority::Medium);
 

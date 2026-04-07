@@ -289,7 +289,11 @@ pub enum ApiEvent {
     /// A new notification was created and persisted.
     NotificationCreated { notification: Notification },
     /// A notification was updated (read or dismissed) — for cross-tab sync.
-    NotificationUpdated { id: String, read: bool, dismissed: bool },
+    NotificationUpdated {
+        id: String,
+        read: bool,
+        dismissed: bool,
+    },
 }
 
 impl ApiState {
@@ -489,48 +493,49 @@ impl ApiState {
                                         success: *success,
                                     })
                                     .ok();
-                                if !success {
-                                    if let Some(ref store) = *notif_store_snap {
-                                        let store = store.clone();
-                                        let event_tx = api_tx.clone();
-                                        let agent_id_n = agent_id.clone();
-                                        let worker_id_n = worker_id.to_string();
-                                        let body = if result.is_empty() {
-                                            None
-                                        } else {
-                                            Some(result.chars().take(300).collect::<String>())
-                                        };
-                                        tokio::spawn(async move {
-                                            let n = NewNotification {
-                                                kind: NotificationKind::WorkerFailed,
-                                                severity: NotificationSeverity::Error,
-                                                title: format!("Worker failed: {worker_id_n}"),
-                                                body,
-                                                agent_id: Some(agent_id_n),
-                                                related_entity_type: Some("worker".to_string()),
-                                                related_entity_id: Some(worker_id_n),
-                                                action_url: None,
-                                                metadata: None,
-                                            };
-                                            match store.insert(n).await {
-                                                Ok(Some(notification)) => {
-                                                    event_tx
-                                                        .send(ApiEvent::NotificationCreated {
-                                                            notification,
-                                                        })
-                                                        .ok();
-                                                }
-                                                Ok(None) => {}
-                                                Err(error) => {
-                                                    tracing::warn!(
-                                                        %error,
-                                                        "failed to insert worker failure notification"
-                                                    );
-                                                }
-                                            }
-                                        });
-                                    }
-                                }
+                                // TODO: re-enable WorkerFailed notifications once action_url points somewhere useful
+                                // if !success {
+                                //     if let Some(ref store) = *notif_store_snap {
+                                //         let store = store.clone();
+                                //         let event_tx = api_tx.clone();
+                                //         let agent_id_n = agent_id.clone();
+                                //         let worker_id_n = worker_id.to_string();
+                                //         let body = if result.is_empty() {
+                                //             None
+                                //         } else {
+                                //             Some(result.chars().take(300).collect::<String>())
+                                //         };
+                                //         tokio::spawn(async move {
+                                //             let n = NewNotification {
+                                //                 kind: NotificationKind::WorkerFailed,
+                                //                 severity: NotificationSeverity::Error,
+                                //                 title: format!("Worker failed: {worker_id_n}"),
+                                //                 body,
+                                //                 agent_id: Some(agent_id_n),
+                                //                 related_entity_type: Some("worker".to_string()),
+                                //                 related_entity_id: Some(worker_id_n),
+                                //                 action_url: None,
+                                //                 metadata: None,
+                                //             };
+                                //             match store.insert(n).await {
+                                //                 Ok(Some(notification)) => {
+                                //                     event_tx
+                                //                         .send(ApiEvent::NotificationCreated {
+                                //                             notification,
+                                //                         })
+                                //                         .ok();
+                                //                 }
+                                //                 Ok(None) => {}
+                                //                 Err(error) => {
+                                //                     tracing::warn!(
+                                //                         %error,
+                                //                         "failed to insert worker failure notification"
+                                //                     );
+                                //                 }
+                                //             }
+                                //         });
+                                //     }
+                                // }
                             }
                             ProcessEvent::BranchResult {
                                 branch_id,

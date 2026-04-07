@@ -1398,7 +1398,6 @@ pub(super) async fn delete_agent(
         state
             .cortex_chat_sessions
             .store(std::sync::Arc::new(sessions));
-
     }
 
     // Signal the main event loop to remove the agent

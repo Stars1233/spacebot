@@ -1629,11 +1629,13 @@ async fn run(
     let global_task_store = Arc::new(spacebot::tasks::TaskStore::new(instance_pool.clone()));
 
     // Instance-level notification store for the dashboard inbox.
-    let global_notification_store =
-        Arc::new(spacebot::notifications::NotificationStore::new(instance_pool.clone()));
+    let global_notification_store = Arc::new(spacebot::notifications::NotificationStore::new(
+        instance_pool.clone(),
+    ));
 
     // Instance-level shared project store. Replaces per-agent project stores.
-    let global_project_store = Arc::new(spacebot::projects::ProjectStore::new(instance_pool.clone()));
+    let global_project_store =
+        Arc::new(spacebot::projects::ProjectStore::new(instance_pool.clone()));
 
     // Migrate per-agent projects into the instance database on first run.
     spacebot::projects::migration::migrate_legacy_projects(&config.instance_dir, &instance_pool)
@@ -2034,6 +2036,7 @@ async fn run(
                         snapshot_store,
                         Some(api_state.live_worker_transcripts.clone()),
                         resolved_settings,
+                        None, // no cron outcome for normal channels
                     );
                     let channel_registration_id = agent
                         .deps
@@ -2317,6 +2320,7 @@ async fn run(
                         snapshot_store,
                         Some(api_state.live_worker_transcripts.clone()),
                         resolved_settings,
+                        None, // no cron outcome for normal channels
                     );
                     let channel_registration_id = agent
                         .deps
@@ -2967,8 +2971,7 @@ async fn initialize_agents(
 
         // Inject active project root paths into the sandbox allowlist so
         // workers can access project directories even outside the workspace.
-        spacebot::projects::refresh_sandbox_project_paths(&project_store, &sandbox)
-            .await;
+        spacebot::projects::refresh_sandbox_project_paths(&project_store, &sandbox).await;
 
         let deps = spacebot::AgentDeps {
             agent_id: agent_id.clone(),
@@ -3714,11 +3717,8 @@ async fn initialize_agents(
 
     // Start cortex warmup, runtime, and association loops for each agent
     for (agent_id, agent) in agents.iter() {
-        let cortex_logger =
-            spacebot::agent::cortex::CortexLogger::new(agent.db.sqlite.clone()).with_notifications(
-                global_notification_store.clone(),
-                agent_id.to_string(),
-            );
+        let cortex_logger = spacebot::agent::cortex::CortexLogger::new(agent.db.sqlite.clone())
+            .with_notifications(global_notification_store.clone(), agent_id.to_string());
         let warmup_handle =
             spacebot::agent::cortex::spawn_warmup_loop(agent.deps.clone(), cortex_logger.clone());
         cortex_handles.push(warmup_handle);

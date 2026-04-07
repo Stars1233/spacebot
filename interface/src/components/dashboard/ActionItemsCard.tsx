@@ -50,7 +50,7 @@ export function ActionItemsCard() {
 	const { notifications, dismiss } = useNotifications("unread");
 
 	return (
-		<Card className="flex h-full flex-col">
+		<Card variant="dark" className="flex h-full flex-col">
 			<CardHeader className="flex-row items-center justify-between p-4 pb-3">
 				<div className="flex items-center gap-2">
 					<h2 className="font-plex text-sm font-medium text-ink-dull">Inbox</h2>
