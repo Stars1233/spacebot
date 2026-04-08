@@ -37,10 +37,18 @@ pub struct ActiveParticipant {
 ///
 /// Uses the configured human ID when available; otherwise falls back to a
 /// platform-scoped sender key to avoid cross-adapter collisions.
-pub fn participant_memory_key(humans: &[HumanDef], platform: &str, sender_id: &str) -> String {
-    find_human_for_sender(humans, platform, sender_id)
+pub fn participant_memory_key(
+    humans: &[HumanDef],
+    base_platform: &str,
+    adapter: Option<&str>,
+    sender_id: &str,
+) -> String {
+    find_human_for_sender(humans, base_platform, sender_id)
         .map(|entry| entry.id.clone())
-        .unwrap_or_else(|| format!("{platform}:{sender_id}"))
+        .unwrap_or_else(|| {
+            let adapter_or_base = adapter.unwrap_or(base_platform);
+            format!("{adapter_or_base}:{sender_id}")
+        })
 }
 
 /// Resolve and record a participant seen in an inbound message.
@@ -58,17 +66,18 @@ pub fn track_active_participant(
         return;
     }
 
+    let adapter = message.adapter.as_deref();
     let human = find_human_for_sender(humans, platform, &message.sender_id);
     let display_name = human
         .and_then(|entry| entry.display_name.as_deref())
         .and_then(sanitize_display_name)
         .unwrap_or_else(|| participant_display_name(message));
-    let participant_key = participant_memory_key(humans, platform, &message.sender_id);
-    let fallback_key = format!("{platform}:{}", message.sender_id);
+    let participant_key = participant_memory_key(humans, platform, adapter, &message.sender_id);
+    let fallback_key = format!("{}:{}", adapter.unwrap_or(platform), message.sender_id);
 
     participants.retain(|existing_key, participant| {
         (existing_key == &participant_key)
-            || participant.platform != platform
+            || participant.platform != adapter.unwrap_or(platform)
             || participant.sender_id != message.sender_id
     });
     if participant_key != fallback_key {
@@ -79,7 +88,7 @@ pub fn track_active_participant(
         participant_key.clone(),
         ActiveParticipant {
             participant_key,
-            platform: platform.to_string(),
+            platform: adapter.unwrap_or(platform).to_string(),
             sender_id: message.sender_id.clone(),
             display_name,
             role: human.and_then(|entry| entry.role.clone()),
@@ -276,9 +285,31 @@ mod tests {
     #[test]
     fn participant_memory_key_uses_platform_scope_for_unknown_sender() {
         assert_eq!(
-            participant_memory_key(&[], "discord", "12345"),
+            participant_memory_key(&[], "discord", None, "12345"),
             "discord:12345"
         );
+    }
+
+    #[test]
+    fn participant_memory_key_uses_adapter_scope_for_unknown_sender() {
+        assert_eq!(
+            participant_memory_key(&[], "signal", Some("signal:work"), "12345"),
+            "signal:work:12345"
+        );
+    }
+
+    #[test]
+    fn track_active_participant_uses_adapter_scope_for_fallback_key() {
+        let mut participants = HashMap::new();
+        let mut message = test_message();
+        message.source = "signal".to_string();
+        message.adapter = Some("signal:work".to_string());
+        message.conversation_id = "signal:work:chan-1".to_string();
+
+        track_active_participant(&mut participants, &[], &message);
+
+        assert!(participants.contains_key("signal:work:12345"));
+        assert!(!participants.contains_key("signal:12345"));
     }
 
     #[test]
