@@ -13,7 +13,7 @@ export function SetupBanner() {
 	if (!data || data.has_any) return null;
 
 	return (
-		<Banner variant="warning" dot="static">
+		<Banner variant="warning">
 			No LLM provider configured.{" "}
 			<Link to="/settings" className="underline hover:text-amber-300">
 				Add an API key in Settings

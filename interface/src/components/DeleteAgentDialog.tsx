@@ -72,12 +72,12 @@ export function DeleteAgentDialog({open, onOpenChange, agentId}: DeleteAgentDial
 					)}
 				</div>
 				<DialogFooter>
-					<Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
+					<Button variant="bare" size="sm" onClick={() => onOpenChange(false)}>
 						Cancel
 					</Button>
 					<Button
 						size="sm"
-						variant="destructive"
+						variant="accent"
 						onClick={handleSubmit}
 						loading={deleteMutation.isPending}
 						disabled={!confirmed}

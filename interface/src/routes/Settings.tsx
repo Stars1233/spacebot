@@ -871,7 +871,6 @@ export function Settings() {
 										!azureApiVersion.trim() ||
 										!azureDeployment.trim()))
 							}
-							loading={testModelMutation.isPending}
 							variant="outline"
 							size="md"
 						>
@@ -920,8 +919,7 @@ export function Settings() {
 												},
 											})
 										}
-										loading={removeMutation.isPending}
-										variant="destructive"
+										variant="accent"
 										size="md"
 									>
 										Remove
@@ -938,7 +936,6 @@ export function Settings() {
 										!azureApiVersion.trim() ||
 										!azureDeployment.trim()
 									}
-									loading={updateMutation.isPending}
 									size="md"
 								>
 									Save
@@ -952,7 +949,6 @@ export function Settings() {
 								<Button
 									onClick={handleSave}
 									disabled={!modelInput.trim()}
-									loading={updateMutation.isPending}
 									size="md"
 								>
 									Save

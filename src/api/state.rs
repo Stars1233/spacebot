@@ -13,9 +13,7 @@ use crate::mcp::McpManager;
 use crate::memory::{EmbeddingModel, MemorySearch};
 use crate::messaging::MessagingManager;
 use crate::messaging::portal::PortalAdapter;
-use crate::notifications::{
-    NewNotification, Notification, NotificationStore,
-};
+use crate::notifications::{NewNotification, Notification, NotificationStore};
 use crate::projects::ProjectStore;
 use crate::prompts::PromptEngine;
 use crate::tasks::TaskStore;

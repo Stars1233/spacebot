@@ -184,12 +184,12 @@ export function HumanEditDialog({
 							)}
 						<div className="flex-1" />
 						<div className="flex items-center gap-2 pt-2 border-t border-app-line/50">
-							<Button variant="destructive" size="sm" onClick={onDelete}>
+							<Button variant="accent" size="sm" onClick={onDelete}>
 								Delete
 							</Button>
 							<div className="flex-1" />
 							<Button
-								variant="ghost"
+								variant="bare"
 								size="sm"
 								onClick={() => onOpenChange(false)}
 							>

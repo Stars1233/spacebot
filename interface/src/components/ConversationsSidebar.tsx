@@ -271,7 +271,7 @@ export function ConversationsSidebar({
 						>
 							Cancel
 						</Button>
-						<Button variant="destructive" onClick={confirmDelete}>
+						<Button variant="accent" onClick={confirmDelete}>
 							Delete
 						</Button>
 					</DialogFooter>

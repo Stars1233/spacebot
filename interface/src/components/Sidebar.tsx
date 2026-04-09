@@ -40,8 +40,6 @@ import {
 	CalendarDots,
 	SlidersHorizontal,
 	BookBookmark,
-	Plus,
-	PencilSimple,
 } from "@phosphor-icons/react";
 import {
 	CircleButton,

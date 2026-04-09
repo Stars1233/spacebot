@@ -100,7 +100,7 @@ export function GroupConfigPanel({
 				<Button
 					onClick={onDelete}
 					size="sm"
-					variant="destructive"
+					variant="accent"
 					className="text-tiny"
 				>
 					Delete

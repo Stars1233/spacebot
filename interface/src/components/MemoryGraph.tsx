@@ -473,7 +473,7 @@ export function MemoryGraph({agentId, sort, typeFilter}: MemoryGraphProps) {
 							</span>
 							<Button
 								onClick={() => setSelectedNode(null)}
-								variant="ghost"
+								variant="bare"
 								size="icon"
 								className="h-7 w-7"
 							>

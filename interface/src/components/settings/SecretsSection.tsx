@@ -651,7 +651,7 @@ export function SecretsSection() {
 								if (deleteTarget) deleteMutation.mutate(deleteTarget);
 							}}
 							loading={deleteMutation.isPending}
-							variant="destructive"
+							variant="accent"
 							size="md"
 						>
 							Delete
@@ -717,7 +717,7 @@ export function SecretsSection() {
 									<Button
 										onClick={handleCopyKey}
 										size="md"
-										variant={masterKeyCopied ? "secondary" : "outline"}
+										variant={masterKeyCopied ? "gray" : "outline"}
 									>
 										{masterKeyCopied ? "Copied" : "Copy"}
 									</Button>

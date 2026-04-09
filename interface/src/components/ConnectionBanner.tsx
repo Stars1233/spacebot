@@ -28,7 +28,7 @@ export function ConnectionBanner({
 	const {label, variant} = stateConfig[state];
 
 	return (
-		<Banner className="m-2 mb-0" variant={variant} dot="pulse">
+		<Banner className="m-2 mb-0" variant={variant}>
 			{label}
 		</Banner>
 	);

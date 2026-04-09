@@ -277,7 +277,6 @@ function WorkerPanelRow({
 	status,
 	workerType,
 	startedAt,
-	completedAt,
 	isLive,
 	toolCalls,
 	onClick,

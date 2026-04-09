@@ -350,7 +350,7 @@ export function AgentCron({agentId}: AgentCronProps) {
 								Schedule automated tasks that run on a timer and deliver results
 								to messaging channels
 							</p>
-							<Button onClick={openCreate} variant="secondary" size="sm">
+							<Button onClick={openCreate} variant="gray" size="sm">
 								+ New Job
 							</Button>
 						</div>
@@ -500,8 +500,7 @@ export function AgentCron({agentId}: AgentCronProps) {
 													}
 													min={1}
 													max={999}
-													variant="compact"
-												/>
+														/>
 												<SelectRoot
 													value={formData.interval_unit}
 													onValueChange={(value) =>
@@ -592,7 +591,6 @@ export function AgentCron({agentId}: AgentCronProps) {
 										min={0}
 										max={23}
 										suffix="h"
-										variant="compact"
 									/>
 									<span className="text-sm text-ink-faint">to</span>
 									<NumberStepper
@@ -606,7 +604,6 @@ export function AgentCron({agentId}: AgentCronProps) {
 										min={0}
 										max={23}
 										suffix="h"
-										variant="compact"
 									/>
 								</div>
 								<p className="mt-1 text-tiny text-ink-faint">
@@ -669,7 +666,6 @@ export function AgentCron({agentId}: AgentCronProps) {
 								(formData.schedule_mode === "cron" &&
 									!formData.cron_expr.trim())
 							}
-							loading={saveMutation.isPending}
 						>
 							{editingJob ? "Save Changes" : "Create Job"}
 						</Button>
@@ -702,12 +698,11 @@ export function AgentCron({agentId}: AgentCronProps) {
 							Cancel
 						</Button>
 						<Button
-							variant="destructive"
+							variant="accent"
 							size="sm"
 							onClick={() =>
 								deleteConfirmId && deleteMutation.mutate(deleteConfirmId)
 							}
-							loading={deleteMutation.isPending}
 						>
 							Delete
 						</Button>

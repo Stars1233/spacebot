@@ -2,8 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
 	api,
-	type WikiPage,
-	type WikiPageSummary,
+type WikiPageSummary,
 	type WikiPageType,
 	type CreateWikiPageRequest,
 } from "@/api/client";

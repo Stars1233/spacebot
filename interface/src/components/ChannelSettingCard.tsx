@@ -588,7 +588,7 @@ export function InstanceCard({
 										</p>
 										<div className="flex gap-2">
 											<Button
-												variant="ghost"
+												variant="bare"
 												size="sm"
 												onClick={() => setConfirmRemove(false)}
 											>
@@ -1405,7 +1405,7 @@ export function AddInstanceCard({
 				)}
 
 				<div className="flex gap-2 justify-end">
-					<Button size="sm" variant="ghost" onClick={onCancel}>
+					<Button size="sm" variant="bare" onClick={onCancel}>
 						Cancel
 					</Button>
 					<Button
@@ -1589,7 +1589,7 @@ function BindingForm({
 			</div>
 
 			<DialogFooter>
-				<Button size="sm" variant="ghost" onClick={onCancel}>
+				<Button size="sm" variant="bare" onClick={onCancel}>
 					Cancel
 				</Button>
 				<Button size="sm" onClick={onSave} loading={saving}>

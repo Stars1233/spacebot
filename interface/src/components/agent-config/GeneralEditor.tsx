@@ -204,7 +204,7 @@ export function GeneralEditor({
 									</Button>
 									{avatarExists && (
 										<Button
-											variant="ghost"
+											variant="bare"
 											size="sm"
 											onClick={() => deleteAvatarMutation.mutate()}
 											className="text-ink-faint hover:text-red-400"

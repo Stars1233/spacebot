@@ -208,7 +208,7 @@ export function PromptInspectModal({
 				</div>
 
 				<div className="flex flex-shrink-0 items-center justify-end border-t border-app-line/50 px-6 py-3">
-					<Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
+					<Button variant="bare" size="sm" onClick={() => onOpenChange(false)}>
 						Close
 					</Button>
 				</div>

@@ -84,7 +84,7 @@ export function AgentChannels({agentId, liveStates}: AgentChannelsProps) {
 								onClick={() =>
 									navigate({to: "/settings", search: {tab: "channels"}})
 								}
-								variant="secondary"
+								variant="gray"
 								size="sm"
 							>
 								Go to Settings

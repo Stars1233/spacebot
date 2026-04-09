@@ -221,7 +221,7 @@ export function AgentMemories({agentId}: AgentMemoriesProps) {
 						key={type_}
 						onClick={() => setTypeFilter(typeFilter === type_ ? null : type_)}
 						active={typeFilter === type_}
-						colorClass={TYPE_COLORS[type_]}
+
 					>
 						{type_}
 					</FilterButton>

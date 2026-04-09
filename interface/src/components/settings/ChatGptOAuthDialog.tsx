@@ -80,7 +80,7 @@ export function ChatGptOAuthDialog({
 									<Button
 										onClick={onCopyDeviceCode}
 										size="md"
-										variant={deviceCodeCopied ? "secondary" : "outline"}
+										variant={deviceCodeCopied ? "gray" : "outline"}
 									>
 										{deviceCodeCopied ? "Copied" : "Copy"}
 									</Button>

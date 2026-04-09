@@ -8,7 +8,6 @@ import {
 	type CortexChatThread,
 } from "@/api/client";
 import {
-	Button,
 	CircleButton,
 	CircleButtonGroup,
 	PopoverRoot,

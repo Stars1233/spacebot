@@ -159,7 +159,6 @@ export function AgentCortex({agentId}: AgentCortexProps) {
 							)
 						}
 						active={groupFilter === group.label}
-						colorClass={EVENT_CATEGORY_COLORS[group.types[0]]}
 					>
 						{group.label}
 					</FilterButton>

@@ -68,7 +68,7 @@ export function AgentEditDialog({
 				</div>
 				<DialogFooter>
 					<div className="flex-1" />
-					<Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
+					<Button variant="bare" size="sm" onClick={() => onOpenChange(false)}>
 						Cancel
 					</Button>
 					<Button size="sm" onClick={() => onUpdate(displayName, role)}>

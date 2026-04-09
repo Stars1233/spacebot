@@ -46,7 +46,6 @@ import {
 } from "@spacedrive/primitives";
 import {formatTimeAgo} from "@/lib/format";
 import {clsx} from "clsx";
-import {AnimatePresence, motion} from "framer-motion";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -269,7 +268,6 @@ function CreateProjectDialog({
 						<Button
 							type="submit"
 							disabled={!name.trim() || !rootPath.trim()}
-							loading={createMutation.isPending}
 						>
 							Create
 						</Button>
@@ -438,7 +436,6 @@ function EditProjectDialog({
 						<Button
 							type="submit"
 							disabled={!name.trim()}
-							loading={updateMutation.isPending}
 						>
 							Save
 						</Button>
@@ -553,7 +550,6 @@ function CreateWorktreeDialog({
 						<Button
 							type="submit"
 							disabled={!repoId || !branch.trim()}
-							loading={createMutation.isPending}
 						>
 							Create
 						</Button>
@@ -574,14 +570,13 @@ function DeleteDialog({
 	title,
 	description,
 	onConfirm,
-	isPending,
 }: {
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	title: string;
 	description: string;
 	onConfirm: () => void;
-	isPending: boolean;
+	isPending?: boolean;
 }) {
 	return (
 		<DialogRoot open={open} onOpenChange={onOpenChange}>
@@ -594,7 +589,7 @@ function DeleteDialog({
 					<Button variant="outline" onClick={() => onOpenChange(false)}>
 						Cancel
 					</Button>
-					<Button variant="destructive" onClick={onConfirm} loading={isPending}>
+					<Button variant="accent" onClick={onConfirm}>
 						Delete
 					</Button>
 				</DialogFooter>

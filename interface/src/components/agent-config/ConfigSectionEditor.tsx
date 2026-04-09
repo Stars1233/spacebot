@@ -1,5 +1,4 @@
 import {useCallback, useEffect, useState} from "react";
-import {cx} from "class-variance-authority";
 import {
 	Input,
 	NumberStepper,
@@ -310,8 +309,6 @@ export function ConfigSectionEditor({
 							min={0}
 							max={1}
 							step={0.01}
-							type="float"
-							showProgress
 						/>
 						<NumberStepper
 							label="Aggressive Threshold"
@@ -321,8 +318,6 @@ export function ConfigSectionEditor({
 							min={0}
 							max={1}
 							step={0.01}
-							type="float"
-							showProgress
 						/>
 						<NumberStepper
 							label="Emergency Threshold"
@@ -332,8 +327,6 @@ export function ConfigSectionEditor({
 							min={0}
 							max={1}
 							step={0.01}
-							type="float"
-							showProgress
 						/>
 					</div>
 				);

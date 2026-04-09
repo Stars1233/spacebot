@@ -43,10 +43,10 @@ function CancelButton({
 	return (
 		<Button
 			type="button"
-			variant="ghost"
+			variant="bare"
 			size="icon"
 			disabled={cancelling}
-			onClick={(e) => {
+			onClick={(e: React.MouseEvent<HTMLButtonElement>) => {
 				e.stopPropagation();
 				setCancelling(true);
 				onClick();
@@ -596,7 +596,7 @@ export function ChannelDetail({
 						<Button
 							aria-label="Inspect prompt"
 							onClick={() => setInspectOpen(true)}
-							variant="ghost"
+							variant="bare"
 							size="icon"
 							title="Inspect prompt"
 						>

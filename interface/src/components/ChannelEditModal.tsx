@@ -737,14 +737,14 @@ export function ChannelEditModal({
 										</div>
 										<Button
 											size="sm"
-											variant="ghost"
+											variant="bare"
 											onClick={() => startEditBinding(binding)}
 										>
 											Edit
 										</Button>
 										<Button
 											size="sm"
-											variant="ghost"
+											variant="bare"
 											onClick={() => handleDeleteBinding(binding)}
 											loading={deleteBinding.isPending}
 										>
@@ -912,7 +912,7 @@ export function ChannelEditModal({
 								<div className="flex gap-2 justify-end">
 									<Button
 										size="sm"
-										variant="ghost"
+										variant="bare"
 										onClick={() => {
 											setEditingBinding(null);
 											setAddingBinding(false);
@@ -958,7 +958,7 @@ export function ChannelEditModal({
 					<div className="border-t border-app-line pt-4">
 						{!confirmDisconnect ? (
 							<Button
-								variant="ghost"
+								variant="bare"
 								size="sm"
 								onClick={() => setConfirmDisconnect(true)}
 								className="text-red-400 hover:text-red-300"
@@ -973,7 +973,7 @@ export function ChannelEditModal({
 								</p>
 								<div className="flex gap-2">
 									<Button
-										variant="ghost"
+										variant="bare"
 										size="sm"
 										onClick={() => setConfirmDisconnect(false)}
 									>

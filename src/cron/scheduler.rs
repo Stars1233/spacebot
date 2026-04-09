@@ -17,7 +17,7 @@ use cron::Schedule;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::RwLock;
 use tokio::time::Duration;
 
 /// A cron job definition loaded from the database.

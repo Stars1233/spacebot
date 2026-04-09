@@ -244,13 +244,6 @@ export function OrgGraphInner({activeEdges, agents}: OrgGraphInnerProps) {
 		},
 	});
 
-	const createGroup = useMutation({
-		mutationFn: (name: string) => api.createGroup({name, agent_ids: []}),
-		onSuccess: () => {
-			queryClient.invalidateQueries({queryKey: ["topology"]});
-		},
-	});
-
 	const updateGroup = useMutation({
 		mutationFn: (params: {
 			originalName: string;
@@ -272,13 +265,6 @@ export function OrgGraphInner({activeEdges, agents}: OrgGraphInnerProps) {
 		onSuccess: () => {
 			queryClient.invalidateQueries({queryKey: ["topology"]});
 			setSelectedGroup(null);
-		},
-	});
-
-	const createHuman = useMutation({
-		mutationFn: (id: string) => api.createHuman({id}),
-		onSuccess: () => {
-			queryClient.invalidateQueries({queryKey: ["topology"]});
 		},
 	});
 
@@ -574,11 +560,6 @@ export function OrgGraphInner({activeEdges, agents}: OrgGraphInnerProps) {
 		},
 		[onNodesChange, nodes, groups, queryClient, setNodes],
 	);
-
-	const handleCreateGroup = useCallback(() => {
-		const name = `Group ${groups.length + 1}`;
-		createGroup.mutate(name);
-	}, [groups, createGroup]);
 
 	if (isLoading) {
 		return (
