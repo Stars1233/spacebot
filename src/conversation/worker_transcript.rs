@@ -438,12 +438,10 @@ fn convert_history(history: &[rig::message::Message]) -> Vec<TranscriptStep> {
                 let mut parts = Vec::new();
                 for item in content.iter() {
                     match item {
-                        rig::message::AssistantContent::Text(text) => {
-                            if !text.text.is_empty() {
-                                parts.push(ActionContent::Text {
-                                    text: text.text.clone(),
-                                });
-                            }
+                        rig::message::AssistantContent::Text(text) if !text.text.is_empty() => {
+                            parts.push(ActionContent::Text {
+                                text: text.text.clone(),
+                            });
                         }
                         rig::message::AssistantContent::ToolCall(tool_call) => {
                             let args_str = tool_call.function.arguments.to_string();
@@ -497,13 +495,13 @@ fn convert_history(history: &[rig::message::Message]) -> Vec<TranscriptStep> {
                                 status: ToolResultStatus::Final,
                             });
                         }
-                        rig::message::UserContent::Text(text) => {
+                        rig::message::UserContent::Text(text)
+                            if !text.text.is_empty() && !text.text.starts_with("[System:") =>
+                        {
                             // Skip compaction markers and system-injected messages
-                            if !text.text.is_empty() && !text.text.starts_with("[System:") {
-                                steps.push(TranscriptStep::UserText {
-                                    text: text.text.clone(),
-                                });
-                            }
+                            steps.push(TranscriptStep::UserText {
+                                text: text.text.clone(),
+                            });
                         }
                         _ => {}
                     }

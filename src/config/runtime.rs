@@ -195,12 +195,12 @@ impl RuntimeConfig {
     /// This bumps the dirty counter so the cortex regenerates knowledge synthesis.
     /// Do NOT call for importance-only changes (decay, access count).
     pub fn bump_knowledge_synthesis_version(&self) {
-        self.knowledge_synthesis_version
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.knowledge_synthesis_last_change.store(
             chrono::Utc::now().timestamp(),
-            std::sync::atomic::Ordering::Relaxed,
+            std::sync::atomic::Ordering::Release,
         );
+        self.knowledge_synthesis_version
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     }
 
     /// Compute the current dispatch-readiness signal.

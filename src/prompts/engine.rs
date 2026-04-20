@@ -683,8 +683,6 @@ impl PromptEngine {
         participant_context: Option<String>,
         direct_mode: bool,
     ) -> Result<String> {
-        let knowledge_synthesis = knowledge_synthesis.or_else(|| memory_bulletin.clone());
-
         self.render(
             "channel",
             context! {
@@ -822,6 +820,37 @@ mod tests {
             .expect("tool-use guidance should render");
 
         assert_eq!(prompt, "Base prompt");
+    }
+
+    #[test]
+    fn renders_memory_context_when_knowledge_synthesis_is_absent() {
+        let engine = PromptEngine::new("en").expect("prompt engine should build");
+        let prompt = engine
+            .render_channel_prompt_with_links(
+                None,
+                Some("Bulletin fallback".to_string()),
+                None,
+                None,
+                String::new(),
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .expect("channel prompt should render");
+
+        assert!(prompt.contains("## Memory Context"));
+        assert!(prompt.contains("Bulletin fallback"));
+        assert!(!prompt.contains("## Knowledge Context"));
     }
 }
 // to support multiple languages at compile time.

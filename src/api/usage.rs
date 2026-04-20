@@ -393,7 +393,7 @@ pub(super) async fn get_usage(
     };
 
     let mut by_model: Vec<UsageByModel> = all_by_model.into_values().collect();
-    by_model.sort_by(|a, b| b.request_count.cmp(&a.request_count));
+    by_model.sort_by_key(|model| std::cmp::Reverse(model.request_count));
 
     let mut by_day: Vec<UsageByDay> = all_by_day.into_values().collect();
     by_day.sort_by(|a, b| a.date.cmp(&b.date));
