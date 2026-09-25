@@ -328,14 +328,20 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 		[],
 	);
 
+	const resumeGlobalWorker = useCallback(
+		(worker: GlobalActiveWorker) =>
+			resumeWorker(worker, () => recordWorkerLifecycle(worker.agentId, worker.id)),
+		[recordWorkerLifecycle],
+	);
+
 	const resumeActiveWorker = useCallback((workerId: string, registrationId: string | null) => {
 		updateActiveWorkers((workers) => {
 			const worker = workers[workerId];
 			if (!worker || worker.registrationId !== registrationId) return workers;
-			const resumed = resumeWorker(worker);
+			const resumed = resumeGlobalWorker(worker);
 			return resumed === worker ? workers : {...workers, [workerId]: resumed};
 		});
-	}, [updateActiveWorkers]);
+	}, [updateActiveWorkers, resumeGlobalWorker]);
 
 	const wrappedWorkerStatus = useCallback((data: unknown) => {
 		const event = data as import("@/api/client").WorkerStatusEvent;
@@ -443,12 +449,12 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 				updateActiveWorkers((workers) => {
 					const worker = workers[event.process_id];
 					if (!worker || worker.registrationId !== event.worker_registration_id) return workers;
-					return {...workers, [event.process_id]: {...resumeWorker(worker), currentTool: event.tool_name}};
+					return {...workers, [event.process_id]: {...resumeGlobalWorker(worker), currentTool: event.tool_name}};
 				});
 				bumpWorkerVersion();
 			}
 		}
-	}, [channelHandlers, workerEventIsCurrent, updateActiveWorkers, bumpWorkerVersion]);
+	}, [channelHandlers, workerEventIsCurrent, updateActiveWorkers, resumeGlobalWorker, bumpWorkerVersion]);
 
 	const wrappedToolCompleted = useCallback((data: unknown) => {
 		const event = data as ToolCompletedEvent;

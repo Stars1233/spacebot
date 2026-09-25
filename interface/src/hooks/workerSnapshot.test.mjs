@@ -35,32 +35,48 @@ describe("worker snapshot reconciliation", () => {
 });
 
 describe("worker resume", () => {
-	test("returns an idle worker to running", () => {
-		const idleWorker = {
+	function idleWorker() {
+		return {
 			id: "worker-a",
+			registrationId: "1",
+			agentId: "agent-a",
 			isIdle: true,
 			runtimeState: "waiting_for_input",
 			routable: true,
-			currentTool: null,
 		};
+	}
 
-		expect(resumeWorker(idleWorker)).toEqual({
-			id: "worker-a",
+	test("returns an idle worker to running and records its lifecycle", () => {
+		let recorded = 0;
+
+		expect(resumeWorker(idleWorker(), () => (recorded += 1))).toEqual({
+			...idleWorker(),
 			isIdle: false,
 			runtimeState: "running",
 			routable: false,
-			currentTool: null,
 		});
+		expect(recorded).toBe(1);
 	});
 
-	test("leaves a running worker untouched", () => {
-		const runningWorker = {
-			id: "worker-a",
-			isIdle: false,
-			runtimeState: "running",
-			routable: true,
-		};
+	test("leaves a running worker untouched without recording", () => {
+		const runningWorker = {...idleWorker(), isIdle: false, runtimeState: "running"};
+		let recorded = 0;
 
-		expect(resumeWorker(runningWorker)).toBe(runningWorker);
+		expect(resumeWorker(runningWorker, () => (recorded += 1))).toBe(runningWorker);
+		expect(recorded).toBe(0);
+	});
+
+	test("a snapshot requested while idle does not restore idle after a resume", () => {
+		const generations = new Map();
+		let generation = 0;
+		const requestGeneration = generation;
+		const resumed = resumeWorker(idleWorker(), () => {
+			generation += 1;
+			generations.set(workerLifecycleKey("agent-a", "worker-a"), generation);
+		});
+
+		expect(
+			reconcile({"worker-a": resumed}, [idleWorker()], requestGeneration, generations),
+		).toEqual({"worker-a": resumed});
 	});
 });

@@ -158,8 +158,9 @@ function updateLatestWorkerTimelineItem(
 function applyWorkerActivity(
   state: ChannelLiveState,
   worker: ActiveWorker,
+  recordLifecycle: () => void,
 ): ChannelLiveState {
-  const resumed = resumeWorker(worker);
+  const resumed = resumeWorker(worker, recordLifecycle);
   if (resumed === state.workers[worker.id]) return state;
   return {
     ...state,
@@ -207,6 +208,14 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
       workerLifecycleGenerationRef.current,
     );
   }, []);
+  // Whether a worker was idle is only known once its queued channel state is
+  // applied, so the resume generation is recorded from inside the state
+  // updater. Updaters run in queue order, so it lands before any later
+  // snapshot merge reads the generations.
+  const recordWorkerResume = useCallback(
+    (workerId: string) => () => recordWorkerLifecycle(workerId),
+    [recordWorkerLifecycle],
+  );
 
   // Load conversation history for each channel on first appearance
   useEffect(() => {
@@ -952,10 +961,11 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
               return prev;
             return {
               ...prev,
-              [channelId]: applyWorkerActivity(state, {
-                ...worker,
-                currentTool: event.tool_name,
-              }),
+              [channelId]: applyWorkerActivity(
+                state,
+                { ...worker, currentTool: event.tool_name },
+                recordWorkerResume(event.process_id),
+              ),
             };
           }
           if (event.process_type === "branch") {
@@ -989,10 +999,11 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
               const worker = state.workers[event.process_id];
               return {
                 ...prev,
-                [chId]: applyWorkerActivity(state, {
-                  ...worker,
-                  currentTool: event.tool_name,
-                }),
+                [chId]: applyWorkerActivity(
+                  state,
+                  { ...worker, currentTool: event.tool_name },
+                  recordWorkerResume(event.process_id),
+                ),
               };
             }
             if (
@@ -1019,7 +1030,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
         });
       }
     },
-    [pushItem],
+    [pushItem, recordWorkerResume],
   );
 
   const handleToolCompleted = useCallback((data: unknown) => {
@@ -1158,13 +1169,17 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
           const state = prev[id];
           const worker = state?.workers[workerId];
           if (!worker || worker.registrationId !== registrationId) continue;
-          const next = applyWorkerActivity(state, worker);
+          const next = applyWorkerActivity(
+            state,
+            worker,
+            recordWorkerResume(workerId),
+          );
           return next === state ? prev : { ...prev, [id]: next };
         }
         return prev;
       });
     },
-    [],
+    [recordWorkerResume],
   );
 
   const handleProcessText = useCallback(
