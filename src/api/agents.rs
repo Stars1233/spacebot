@@ -560,6 +560,7 @@ pub(super) async fn trigger_warmup(
                 autonomy_run_store: Arc::new(crate::wakes::AutonomyRunStore::new(
                     sqlite_pool.clone(),
                 )),
+                autonomy_control: crate::agent::autonomy::AutonomyControl::default(),
                 project_store,
                 links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
                 agent_names: Arc::new(std::collections::HashMap::new()),
@@ -1005,6 +1006,7 @@ pub async fn create_agent_internal(
         autonomy_ceiling: state.autonomy_ceiling.clone(),
         wake_def_store: Arc::new(crate::wakes::WakeDefStore::new(db.sqlite.clone())),
         autonomy_run_store: Arc::new(crate::wakes::AutonomyRunStore::new(db.sqlite.clone())),
+        autonomy_control: crate::agent::autonomy::AutonomyControl::default(),
         project_store: project_store.clone(),
         cron_tool: None,
         runtime_config: runtime_config.clone(),
@@ -1156,20 +1158,37 @@ pub async fn create_agent_internal(
     let sqlite_pool = db.sqlite.clone();
     let mut deps_with_cron = deps.clone();
     deps_with_cron.cron_tool = Some(cron_tool);
+    let autonomy_control = deps_with_cron.autonomy_control.clone();
+    let process_control_registry = deps_with_cron.process_control_registry.clone();
+    let autonomy_supervisor =
+        crate::agent::autonomy::spawn_autonomy_supervisor(deps_with_cron.clone());
     let agent = crate::Agent {
         id: arc_agent_id.clone(),
         config: agent_config.clone(),
         db,
         deps: deps_with_cron,
+        autonomy_supervisor: Some(autonomy_supervisor),
     };
     if let Err(error) = state.agent_tx.send(agent).await {
-        tracing::error!(%error, "failed to send new agent to main loop");
+        let mut agent = error.0;
+        if let Some(supervisor) = agent.autonomy_supervisor.take() {
+            supervisor.shutdown(false).await;
+        }
+        state.wake_registry.write().await.remove(&arc_agent_id);
+        tracing::error!(agent_id = %agent_id, "failed to send new agent to main loop");
+        return Err("main loop is not accepting new agents".to_string());
     }
 
     {
         let mut pools = (**state.agent_pools.load()).clone();
         pools.insert(agent_id.clone(), sqlite_pool);
         state.agent_pools.store(std::sync::Arc::new(pools));
+
+        let mut registries = (**state.process_control_registries.load()).clone();
+        registries.insert(agent_id.clone(), process_control_registry);
+        state
+            .process_control_registries
+            .store(std::sync::Arc::new(registries));
 
         let mut searches = (**state.memory_searches.load()).clone();
         searches.insert(agent_id.clone(), memory_search);
@@ -1236,6 +1255,8 @@ pub async fn create_agent_internal(
             .cortex_chat_sessions
             .store(std::sync::Arc::new(sessions));
     }
+
+    autonomy_control.activate();
 
     tracing::info!(agent_id = %agent_id, "agent created and initialized via API");
 
@@ -1467,9 +1488,15 @@ pub(super) async fn delete_agent(
     // Drop the wake-manager registration only after the fallible config write
     // succeeds. Removing it earlier would leave the agent alive but unwakeable
     // if the write failed mid-flight.
-    {
+    let removed_deps = {
         let key: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
-        state.wake_registry.write().await.remove(&key);
+        state.wake_registry.write().await.remove(&key)
+    };
+    if let Some(deps) = removed_deps {
+        deps.autonomy_control.shutdown_and_wait().await;
+        deps.process_control_registry
+            .drain_workers("agent deleted", std::time::Duration::from_secs(2))
+            .await;
     }
 
     // Close the SQLite pool before removing state
@@ -1491,6 +1518,12 @@ pub(super) async fn delete_agent(
         let mut pools = (**state.agent_pools.load()).clone();
         pools.remove(&agent_id);
         state.agent_pools.store(std::sync::Arc::new(pools));
+
+        let mut registries = (**state.process_control_registries.load()).clone();
+        registries.remove(&agent_id);
+        state
+            .process_control_registries
+            .store(std::sync::Arc::new(registries));
 
         let mut searches = (**state.memory_searches.load()).clone();
         searches.remove(&agent_id);

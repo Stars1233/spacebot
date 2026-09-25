@@ -15,7 +15,6 @@ use crate::agent::chronicle::Chronicler;
 use crate::agent::compactor::Compactor;
 use crate::agent::process_control::ControlActionResult;
 use crate::agent::status::{StatusBlock, SystemInfo};
-use crate::agent::worker::Worker;
 use crate::config::CompactionMode;
 use crate::conversation::settings::{
     DelegationMode, MemoryMode, ResolvedConversationSettings, ResponseMode,
@@ -37,8 +36,7 @@ use rig::completion::CompletionModel;
 use rig::message::UserContent;
 use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, mpsc};
@@ -66,6 +64,7 @@ struct PendingResult {
 }
 
 const EVENT_LAG_WARNING_INTERVAL_SECS: u64 = 30;
+const RETRIGGER_RELAY_RETRY_LIMIT: u64 = 1;
 /// Ceiling on messages restored into live history when a channel starts. The
 /// compactor and chronicler trim from there under their own thresholds.
 const HYDRATE_MESSAGE_LIMIT: i64 = 200;
@@ -127,7 +126,11 @@ fn is_control_command(message: &InboundMessage) -> bool {
         crate::MessageContent::Command { .. } => message.content.to_string(),
         _ => return false,
     };
-    match crate::commands::REGISTRY.parse(&text) {
+    let bot_username = message
+        .metadata
+        .get("telegram_bot_username")
+        .and_then(serde_json::Value::as_str);
+    match crate::commands::REGISTRY.parse_addressed(&text, bot_username) {
         crate::commands::ParseResult::Command(command) => matches!(
             command.def.handler,
             crate::commands::CommandHandler::Control(_)
@@ -416,6 +419,7 @@ struct AgentTurnResult {
     result: std::result::Result<String, rig::completion::PromptError>,
     skip_flag: crate::tools::SkipFlag,
     replied_flag: crate::tools::RepliedFlag,
+    delivered_flag: crate::tools::DeliveredFlag,
     retrigger_reply_preserved: bool,
     reply_text: Option<String>,
 }
@@ -423,8 +427,8 @@ struct AgentTurnResult {
 /// What kind of conversation a channel is serving.
 ///
 /// Channels behave differently depending on who is on the other end: user
-/// channels are driven by incoming messages, while cron and autonomy channels
-/// are system-initiated runs that do their work and exit.
+/// channels are driven by incoming messages, cron channels are one-shot, and
+/// autonomy is a resident system channel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelKind {
     User,
@@ -443,10 +447,9 @@ impl std::fmt::Display for ChannelKind {
 }
 
 impl ChannelKind {
-    /// System-initiated channels receive no further user messages after the
-    /// initial prompt, so the event loop exits once all work settles.
+    /// Cron channels receive one prompt and exit once all work settles.
     pub fn self_exits(&self) -> bool {
-        matches!(self, ChannelKind::Cron | ChannelKind::Autonomy)
+        matches!(self, ChannelKind::Cron)
     }
 
     /// System-initiated runs repeat the same procedure on a schedule and
@@ -456,8 +459,7 @@ impl ChannelKind {
     }
 
     /// System-initiated channels have no user to send a reset message, so the
-    /// retrigger cap would permanently stall multi-worker jobs. The job
-    /// timeout is the natural bound instead.
+    /// retrigger cap would permanently stall multi-worker jobs.
     pub fn caps_retriggers(&self) -> bool {
         matches!(self, ChannelKind::User)
     }
@@ -477,23 +479,6 @@ pub struct ChannelState {
     /// holding an older snapshot declines to trim.
     pub history_fence: Arc<crate::agent::chronicle::HistoryFence>,
     pub active_branches: Arc<RwLock<HashMap<BranchId, tokio::task::JoinHandle<()>>>>,
-    pub active_workers: Arc<RwLock<HashMap<WorkerId, Worker>>>,
-    /// Runtime controls for active worker tasks.
-    pub worker_handles:
-        Arc<RwLock<HashMap<WorkerId, crate::agent::channel_dispatch::WorkerTaskControl>>>,
-    /// Input senders for interactive workers, keyed by worker ID.
-    /// Used by the route tool to deliver follow-up messages.
-    pub worker_inputs: Arc<RwLock<HashMap<WorkerId, tokio::sync::mpsc::Sender<String>>>>,
-    /// Injection senders for all workers, keyed by worker ID.
-    /// Used by the route tool to deliver addendum context to running workers
-    /// without requiring the worker to be interactive.
-    pub worker_injections: Arc<RwLock<HashMap<WorkerId, tokio::sync::mpsc::Sender<String>>>>,
-    /// Task descriptions reserved for spawn. Prevents the TOCTOU race where
-    /// two concurrent `spawn_worker` calls both pass `check_duplicate_task`
-    /// before either registers in the status block. Reservations are
-    /// claimed under a write lock before any async spawn work and released
-    /// when the worker is registered in the status block or the spawn fails.
-    pub reserved_tasks: Arc<RwLock<HashSet<String>>>,
     pub status_block: Arc<RwLock<StatusBlock>>,
     pub deps: AgentDeps,
     pub conversation_logger: ConversationLogger,
@@ -535,13 +520,18 @@ pub struct ChannelState {
     /// router-side control plane can apply a mode change mid-turn; the
     /// channel reads it at every gate instead of its startup snapshot.
     pub response_mode: Arc<std::sync::atomic::AtomicU8>,
-    /// Autonomy run state for the `autonomy_complete` tool. Set only on
-    /// `ChannelKind::Autonomy` channels; the run loop uses it to enforce the
-    /// completion contract before self-exit.
-    pub autonomy_run: Option<crate::agent::autonomy::AutonomyRunHandle>,
+    /// Current autonomy epoch. The slot survives between epochs while each
+    /// generation gets a fresh handle and completion contract.
+    pub autonomy_run: Option<crate::agent::autonomy::AutonomyRunSlot>,
 }
 
 impl ChannelState {
+    pub fn autonomy_run(&self) -> Option<crate::agent::autonomy::AutonomyRunHandle> {
+        self.autonomy_run
+            .as_ref()
+            .and_then(crate::agent::autonomy::AutonomyRunSlot::current)
+    }
+
     /// Append a message this agent sent into the channel from outside the
     /// channel's own turn loop, so the next turn sees what was said.
     ///
@@ -556,204 +546,6 @@ impl ChannelState {
             });
         }
         self.history_fence.note_head_mutation();
-    }
-
-    /// Cancel a running worker and converge with any completion already in flight.
-    /// Returns an error message if the worker is not found.
-    pub async fn cancel_worker(&self, worker_id: WorkerId) -> std::result::Result<(), String> {
-        self.cancel_worker_with_reason(worker_id, "cancelled by channel")
-            .await
-    }
-
-    pub async fn cancel_worker_with_reason(
-        &self,
-        worker_id: WorkerId,
-        reason: &str,
-    ) -> std::result::Result<(), String> {
-        let reason = crate::summarize_first_non_empty_line(reason, crate::EVENT_SUMMARY_MAX_CHARS);
-        let result = if reason.is_empty() {
-            "Worker cancelled.".to_string()
-        } else {
-            format!("Worker cancelled: {reason}")
-        };
-
-        let Some(lifecycle) = self
-            .process_run_logger
-            .read_worker_lifecycle(worker_id)
-            .await
-            .map_err(|error| error.to_string())?
-        else {
-            return Err(format!("Worker {worker_id} not found"));
-        };
-
-        if lifecycle.is_terminal() {
-            self.worker_handles.write().await.remove(&worker_id);
-            self.cleanup_worker_routing(worker_id).await;
-            return Ok(());
-        }
-
-        let lifecycle = if lifecycle == crate::conversation::WorkerLifecycle::Completing {
-            lifecycle
-        } else {
-            match self
-                .process_run_logger
-                .transition_worker(
-                    worker_id,
-                    lifecycle,
-                    crate::conversation::WorkerLifecycle::Cancelling,
-                )
-                .await
-                .map_err(|error| error.to_string())?
-            {
-                crate::conversation::WorkerTransitionResult::Applied { current, .. } => current,
-                crate::conversation::WorkerTransitionResult::Conflict { current } => current,
-                crate::conversation::WorkerTransitionResult::NotFound => {
-                    return Err(format!("Worker {worker_id} not found"));
-                }
-            }
-        };
-
-        if lifecycle == crate::conversation::WorkerLifecycle::Completing {
-            let terminal_notify = self
-                .worker_handles
-                .read()
-                .await
-                .get(&worker_id)
-                .map(|control| control.terminal_notify.clone());
-            if let Some(terminal_notify) = terminal_notify {
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    terminal_notify.notified(),
-                )
-                .await;
-            }
-            if self
-                .process_run_logger
-                .read_worker_terminal(worker_id)
-                .await
-                .map_err(|error| error.to_string())?
-                .is_some()
-            {
-                self.worker_handles.write().await.remove(&worker_id);
-                self.cleanup_worker_routing(worker_id).await;
-                return Ok(());
-            }
-        }
-        let mut control = self.worker_handles.write().await.remove(&worker_id);
-        if let Some(control) = &mut control {
-            if let Some(opencode_cancellation) = &control.opencode_cancellation
-                && let Some(session) = opencode_cancellation.lock().await.clone()
-                && let Err(error) = session
-                    .server
-                    .lock()
-                    .await
-                    .abort_session(&session.session_id)
-                    .await
-            {
-                tracing::warn!(%error, %worker_id, "failed to abort OpenCode session");
-            }
-            control.cancel_tx.send_replace(true);
-            if tokio::time::timeout(std::time::Duration::from_millis(500), &mut control.handle)
-                .await
-                .is_err()
-            {
-                control.handle.abort();
-                if let Err(error) = (&mut control.handle).await
-                    && !error.is_cancelled()
-                {
-                    tracing::warn!(%error, %worker_id, "cancelled worker task failed while joining");
-                }
-            }
-        }
-
-        let terminal = self
-            .process_run_logger
-            .read_worker_terminal(worker_id)
-            .await;
-        let terminal = match terminal {
-            Ok(terminal) => terminal,
-            Err(error) => {
-                if let Some(control) = control {
-                    self.worker_handles.write().await.insert(worker_id, control);
-                }
-                return Err(error.to_string());
-            }
-        };
-        if terminal.is_some() {
-            self.cleanup_worker_routing(worker_id).await;
-            return Ok(());
-        }
-
-        let transcript = self
-            .live_worker_transcript_snapshot(worker_id)
-            .await
-            .or_else(|| {
-                control.as_ref().and_then(|control| {
-                    crate::agent::worker::read_worker_transcript_snapshot(
-                        &control.transcript_snapshot,
-                    )
-                })
-            });
-        let outcome_kind = if transcript.is_some()
-            && lifecycle == crate::conversation::WorkerLifecycle::Completing
-        {
-            crate::conversation::WorkerOutcomeKind::Partial
-        } else {
-            crate::conversation::WorkerOutcomeKind::Cancelled
-        };
-        let terminal = crate::agent::channel_dispatch::commit_worker_outcome(
-            &self.process_run_logger,
-            worker_id,
-            outcome_kind,
-            &result,
-            transcript.as_ref(),
-            crate::conversation::WorkerTerminalOwner::Cancel,
-        )
-        .await;
-        let terminal = match terminal {
-            Ok(terminal) => terminal,
-            Err(error) => {
-                if let Some(control) = control {
-                    self.worker_handles.write().await.insert(worker_id, control);
-                }
-                return Err(error.to_string());
-            }
-        };
-        if let Some((terminal, true)) = terminal {
-            self.deps
-                .event_tx
-                .send(crate::agent::channel_dispatch::worker_complete_event(
-                    self.deps.agent_id.clone(),
-                    Some(self.channel_id.clone()),
-                    terminal,
-                    true,
-                ))
-                .ok();
-        }
-        self.cleanup_worker_routing(worker_id).await;
-        Ok(())
-    }
-
-    async fn cleanup_worker_routing(&self, worker_id: WorkerId) {
-        self.worker_inputs.write().await.remove(&worker_id);
-        self.worker_injections.write().await.remove(&worker_id);
-        self.active_workers.write().await.remove(&worker_id);
-    }
-
-    async fn live_worker_transcript_snapshot(
-        &self,
-        worker_id: WorkerId,
-    ) -> Option<crate::agent::worker::WorkerTranscriptPayload> {
-        let process_id = ProcessId::Worker(worker_id).to_string();
-        let live_transcripts = self.live_process_transcripts.read().await;
-        let steps = live_transcripts.get(&process_id)?;
-        if steps.is_empty() {
-            return None;
-        }
-        Some(crate::agent::worker::WorkerTranscriptPayload {
-            transcript: crate::conversation::worker_transcript::serialize_steps(steps),
-            tool_calls: count_transcript_tool_calls(steps),
-        })
     }
 
     /// Cancel a running branch by aborting its tokio task.
@@ -883,22 +675,6 @@ impl ChannelControlHandle {
         &self.inner.state
     }
 
-    pub async fn cancel_worker_with_reason(
-        &self,
-        worker_id: WorkerId,
-        reason: &str,
-    ) -> ControlActionResult {
-        match self
-            .inner
-            .state
-            .cancel_worker_with_reason(worker_id, reason)
-            .await
-        {
-            Ok(()) => ControlActionResult::Cancelled,
-            Err(_) => ControlActionResult::NotFound,
-        }
-    }
-
     pub async fn cancel_branch_with_reason(
         &self,
         branch_id: BranchId,
@@ -942,43 +718,6 @@ impl ChannelControlHandle {
             .state
             .response_mode
             .store(mode.to_u8(), std::sync::atomic::Ordering::Release);
-    }
-
-    /// Cancel all active workers and branches, emitting WorkerComplete/BranchResult
-    /// for each so the channel can retrigger and synthesize partial results.
-    pub async fn cancel_all_workers_and_branches(&self, reason: &str) {
-        let worker_ids: Vec<WorkerId> = self
-            .inner
-            .state
-            .worker_handles
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect();
-        for worker_id in worker_ids {
-            let _ = self
-                .inner
-                .state
-                .cancel_worker_with_reason(worker_id, reason)
-                .await;
-        }
-        let branch_ids: Vec<BranchId> = self
-            .inner
-            .state
-            .active_branches
-            .read()
-            .await
-            .keys()
-            .cloned()
-            .collect();
-        for branch_id in branch_ids {
-            let _ = self
-                .inner
-                .state
-                .cancel_branch_with_reason(branch_id, reason)
-                .await;
-        }
     }
 }
 
@@ -1087,6 +826,9 @@ pub struct Channel {
     /// Background process results waiting to be embedded in the next retrigger.
     /// Accumulated during the debounce window and drained when the retrigger fires.
     pending_results: Vec<PendingResult>,
+    /// A result relay that exhausted automatic retries and waits for the next
+    /// real user turn before another bounded attempt.
+    deferred_retriggers: VecDeque<InboundMessage>,
     consumed_worker_outcomes: HashMap<WorkerId, i64>,
     /// Optional send_agent_message tool (only when agent has active links).
     send_agent_message_tool: Option<crate::tools::SendAgentMessageTool>,
@@ -1094,10 +836,11 @@ pub struct Channel {
     /// Injected into the system prompt (not into chat history) so the LLM
     /// treats it as read-only context rather than actionable user messages.
     backfill_transcript: Option<String>,
-    /// Retry-prompts sent so far for the autonomy completion contract.
-    /// Autonomy channels must call `autonomy_complete` before self-exit;
-    /// this bounds how many times the run loop nudges them.
+    /// Retry prompts sent for the current autonomy epoch's completion contract.
     autonomy_contract_retries: usize,
+    /// A lifecycle event was dropped from the broadcast receiver. While set,
+    /// heartbeats reconcile owned workers from durable lifecycle state.
+    autonomy_event_lagged: bool,
     /// Handle exposed to the supervision control plane.
     control_handle: ChannelControlHandle,
     /// Per-conversation resolved settings (memory mode, delegation mode, model override).
@@ -1195,7 +938,7 @@ impl Channel {
         live_process_transcripts: Option<LiveProcessTranscripts>,
         resolved_settings: ResolvedConversationSettings,
         cron_outcome: Option<crate::cron::CronOutcome>,
-        autonomy_run: Option<crate::agent::autonomy::AutonomyRunHandle>,
+        autonomy_run: Option<crate::agent::autonomy::AutonomyRunSlot>,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
         let hook = SpacebotHook::new(
@@ -1208,7 +951,6 @@ impl Channel {
         let status_block = Arc::new(RwLock::new(StatusBlock::new()));
         let history = Arc::new(RwLock::new(Vec::new()));
         let active_branches = Arc::new(RwLock::new(HashMap::new()));
-        let active_workers = Arc::new(RwLock::new(HashMap::new()));
         let (message_tx, message_rx) = mpsc::channel(64);
 
         let conversation_logger = ConversationLogger::new(deps.sqlite_pool.clone());
@@ -1243,11 +985,6 @@ impl Channel {
             history: history.clone(),
             history_fence: history_fence.clone(),
             active_branches: active_branches.clone(),
-            active_workers: active_workers.clone(),
-            worker_handles: Arc::new(RwLock::new(HashMap::new())),
-            worker_inputs: Arc::new(RwLock::new(HashMap::new())),
-            worker_injections: Arc::new(RwLock::new(HashMap::new())),
-            reserved_tasks: Arc::new(RwLock::new(HashSet::new())),
             status_block: status_block.clone(),
             deps: deps.clone(),
             conversation_logger,
@@ -1330,10 +1067,12 @@ impl Channel {
             pending_retrigger_metadata: HashMap::new(),
             retrigger_deadline: None,
             pending_results: Vec::new(),
+            deferred_retriggers: VecDeque::new(),
             consumed_worker_outcomes: HashMap::new(),
             send_agent_message_tool,
             backfill_transcript: None,
             autonomy_contract_retries: 0,
+            autonomy_event_lagged: false,
             control_handle,
             resolved_settings,
         };
@@ -1344,11 +1083,10 @@ impl Channel {
     /// Set the backfill transcript for injection into the system prompt.
     /// Whether this channel sheds history through the chronicle.
     ///
-    /// Cron and autonomy channels self-exit once their work settles, so
-    /// chronicling them costs an LLM call for a story nobody will read.
+    /// System channels use bounded run summaries instead of chronicles.
     fn uses_chronicle(&self) -> bool {
         self.deps.runtime_config.compaction.load().mode == CompactionMode::Chronicle
-            && !self.state.kind.self_exits()
+            && self.state.kind == ChannelKind::User
     }
 
     /// Run whichever context monitor this channel is configured for.
@@ -1391,7 +1129,7 @@ impl Channel {
     /// fresh single-shot session whose prior rows are its own wake prompts, and
     /// its briefing carries the continuity it needs.
     async fn hydrate_history(&mut self) {
-        if self.state.kind.self_exits() {
+        if self.state.kind != ChannelKind::User {
             return;
         }
         if !self.state.history.read().await.is_empty() {
@@ -1699,7 +1437,13 @@ impl Channel {
     }
 
     fn suppress_plaintext_fallback(&self) -> bool {
-        matches!(self.current_adapter(), Some("email"))
+        self.state.kind == ChannelKind::Cron || matches!(self.current_adapter(), Some("email"))
+    }
+
+    /// Whether this channel can deliver text to a user through the reply tool
+    /// or the plaintext fallback.
+    fn allows_direct_reply(&self) -> bool {
+        self.state.kind == ChannelKind::User && !self.suppress_plaintext_fallback()
     }
 
     async fn track_participant_from_message(&self, message: &InboundMessage) {
@@ -1738,6 +1482,7 @@ impl Channel {
             Some(target) => RoutedResponse {
                 response,
                 target: target.clone(),
+                delivery_receipt: None,
             },
             None => {
                 tracing::warn!(
@@ -1747,10 +1492,24 @@ impl Channel {
                 RoutedResponse {
                     response,
                     target: InboundMessage::empty(),
+                    delivery_receipt: None,
                 }
             }
         };
         self.response_tx.send(routed).await
+    }
+
+    async fn send_routed_confirmed(
+        &self,
+        response: OutboundResponse,
+    ) -> std::result::Result<(), crate::RoutedDeliveryError> {
+        let target = self
+            .current_inbound
+            .clone()
+            .unwrap_or_else(InboundMessage::empty);
+        RoutedSender::new(self.response_tx.clone(), target)
+            .send_confirmed(response)
+            .await
     }
 
     /// Drain accumulated channel tool calls from ApiState and serialize as JSON.
@@ -1876,7 +1635,200 @@ impl Channel {
                 )
                 .await;
             }
+            ControlAction::AutonomyStatus => {
+                let reply = crate::commands::control::autonomy_status(&self.deps).await;
+                self.send_builtin_text(reply, def.name).await;
+            }
+            ControlAction::AutonomyOn => {
+                let reply =
+                    crate::commands::control::set_autonomy_enabled(&self.deps, true, args).await;
+                self.send_builtin_text(reply, def.name).await;
+            }
+            ControlAction::AutonomyOff => {
+                let reply =
+                    crate::commands::control::set_autonomy_enabled(&self.deps, false, args).await;
+                self.send_builtin_text(reply, def.name).await;
+            }
         }
+    }
+
+    async fn begin_autonomy_epoch(&mut self, generation: u64) -> bool {
+        let Some(run) = self.state.autonomy_run() else {
+            return false;
+        };
+        if run.generation != generation {
+            tracing::debug!(
+                generation,
+                current = run.generation,
+                "ignoring stale autonomy epoch message"
+            );
+            return false;
+        }
+
+        self.state.history.write().await.clear();
+        self.state.history_fence.note_head_mutation();
+        self.message_count = 0;
+        self.retrigger_count = 0;
+        self.pending_retrigger = false;
+        self.pending_retrigger_metadata.clear();
+        self.retrigger_deadline = None;
+        self.coalesce_buffer.clear();
+        self.coalesce_deadline = None;
+        self.autonomy_contract_retries = 0;
+        if !self.pending_results.is_empty() {
+            self.pending_retrigger = true;
+            self.retrigger_deadline = Some(
+                tokio::time::Instant::now()
+                    + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+            );
+        }
+        true
+    }
+
+    async fn drive_autonomy_contract(&mut self) -> Result<()> {
+        if self.state.kind != ChannelKind::Autonomy {
+            return Ok(());
+        }
+        let Some(run) = self.state.autonomy_run() else {
+            return Ok(());
+        };
+        if run.finish_requested() {
+            if !run.has_active_children()
+                && !self.pending_retrigger
+                && self.retrigger_deadline.is_none()
+            {
+                run.mark_quiescent();
+            }
+            return Ok(());
+        }
+        if self.message_count == 0
+            || run.has_active_children()
+            || self.pending_retrigger
+            || self.retrigger_deadline.is_some()
+        {
+            return Ok(());
+        }
+
+        if self.autonomy_contract_retries < crate::agent::autonomy::AUTONOMY_CONTRACT_MAX_RETRIES {
+            self.autonomy_contract_retries += 1;
+            let retry_prompt = self
+                .deps
+                .runtime_config
+                .prompts
+                .load()
+                .render_system_autonomy_contract_retry()?;
+            self.handle_message(InboundMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                source: "system".into(),
+                adapter: None,
+                conversation_id: crate::agent::autonomy::AUTONOMY_CONVERSATION_ID.to_string(),
+                sender_id: "system".into(),
+                agent_id: Some(self.deps.agent_id.clone()),
+                content: crate::MessageContent::Text(retry_prompt),
+                timestamp: chrono::Utc::now(),
+                metadata: HashMap::new(),
+                formatted_author: None,
+            })
+            .await?;
+            return Ok(());
+        }
+
+        if run
+            .request_finish(crate::agent::autonomy::AutonomyFinishRequest {
+                summary: crate::agent::autonomy::AUTONOMY_FALLBACK_SUMMARY.to_string(),
+                actions: Vec::new(),
+            })
+            .is_err()
+        {
+            return Ok(());
+        }
+        run.mark_quiescent();
+        Ok(())
+    }
+
+    async fn recover_lagged_autonomy_children(&mut self) -> Result<()> {
+        let Some(run) = self.state.autonomy_run() else {
+            return Ok(());
+        };
+        let mut recovered = 0usize;
+        for child in run.active_children() {
+            let crate::agent::autonomy::AutonomyChild::WorkerOperation {
+                worker_id,
+                operation_id,
+            } = child
+            else {
+                tracing::warn!(
+                    ?child,
+                    "cannot recover a lagged autonomy branch result from durable state"
+                );
+                continue;
+            };
+            let Some(lifecycle) = self
+                .state
+                .process_run_logger
+                .read_worker_lifecycle(worker_id)
+                .await?
+            else {
+                continue;
+            };
+            if lifecycle == crate::conversation::WorkerLifecycle::WaitingForInput {
+                let operation_completed = self
+                    .state
+                    .deps
+                    .process_control_registry
+                    .worker_snapshot(worker_id)
+                    .await
+                    .is_some_and(|snapshot| {
+                        snapshot.last_completed_operation_id == Some(operation_id)
+                    });
+                if !operation_completed {
+                    continue;
+                }
+                self.pending_results.push(PendingResult {
+                    process_type: "worker",
+                    process_id: worker_id.to_string(),
+                    result: "The interactive worker reached idle, but its live result event was lost. Inspect its durable transcript with worker_inspect before deciding the follow-up."
+                        .to_string(),
+                    success: true,
+                });
+                run.settle_child(child);
+                recovered += 1;
+            } else if lifecycle.is_terminal()
+                && let Some(terminal) = self
+                    .state
+                    .process_run_logger
+                    .read_worker_terminal(worker_id)
+                    .await?
+            {
+                self.consumed_worker_outcomes
+                    .insert(worker_id, terminal.outcome_version);
+                self.state
+                    .status_block
+                    .write()
+                    .await
+                    .remove_worker(worker_id);
+                self.pending_results.push(PendingResult {
+                    process_type: "worker",
+                    process_id: worker_id.to_string(),
+                    result: terminal.result,
+                    success: terminal.outcome_kind.is_success(),
+                });
+                run.settle_child(child);
+                recovered += 1;
+            }
+        }
+        if recovered > 0 {
+            self.pending_retrigger = true;
+            self.retrigger_deadline = Some(
+                tokio::time::Instant::now()
+                    + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+            );
+            tracing::warn!(
+                recovered,
+                "recovered autonomy child results after event receiver lag"
+            );
+        }
+        Ok(())
     }
 
     /// Run the channel event loop.
@@ -1887,76 +1839,30 @@ impl Channel {
         let mut last_lag_warning: Option<std::time::Instant> = None;
 
         loop {
-            // Self-exiting channels (cron, autonomy) have no further user messages
+            if let Err(error) = self.drive_autonomy_contract().await {
+                tracing::error!(%error, channel_id = %self.id, "error driving autonomy contract");
+            }
+
+            // Self-exiting cron channels have no further user messages
             // after the initial prompt. Once all workers/branches finish and no
             // retrigger is pending, exit so the caller can flush the reply buffer.
             // Without this the channel would wait on the broadcast event_rx (which
             // never closes) until the job timeout kills it.
+            let has_origin_workers = self
+                .state
+                .deps
+                .process_control_registry
+                .list_worker_snapshots()
+                .await
+                .iter()
+                .any(|worker| worker.provenance.origin_channel_id.as_ref() == Some(&self.id));
             if self.state.kind.self_exits()
                 && self.message_count > 0
                 && !self.pending_retrigger
                 && self.retrigger_deadline.is_none()
-                && self.state.worker_handles.read().await.is_empty()
+                && !has_origin_workers
                 && self.state.active_branches.read().await.is_empty()
             {
-                // Autonomy runs must record their outcome via autonomy_complete
-                // before exiting. When the call is missing, nudge the LLM with
-                // a retry prompt (same budget as the memory-persistence
-                // contract) before giving up; the run driver records a
-                // fallback summary if the budget is exhausted.
-                if let Some(run) = self.state.autonomy_run.clone()
-                    && !run.completed()
-                    && !run.finish_requested()
-                    && self.autonomy_contract_retries
-                        < crate::agent::autonomy::AUTONOMY_CONTRACT_MAX_RETRIES
-                {
-                    self.autonomy_contract_retries += 1;
-                    tracing::warn!(
-                        channel_id = %self.id,
-                        attempt = self.autonomy_contract_retries,
-                        "autonomy run missing autonomy_complete call, retrying"
-                    );
-                    let retry_prompt = match self
-                        .deps
-                        .runtime_config
-                        .prompts
-                        .load()
-                        .render_system_autonomy_contract_retry()
-                    {
-                        Ok(text) => text,
-                        Err(error) => {
-                            tracing::error!(
-                                %error,
-                                channel_id = %self.id,
-                                "failed to render autonomy contract retry prompt"
-                            );
-                            break;
-                        }
-                    };
-                    let retry = InboundMessage {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        source: "system".into(),
-                        adapter: None,
-                        conversation_id: self.conversation_id.clone().unwrap_or_else(|| {
-                            crate::agent::autonomy::AUTONOMY_CONVERSATION_ID.to_string()
-                        }),
-                        sender_id: "system".into(),
-                        agent_id: Some(self.deps.agent_id.clone()),
-                        content: crate::MessageContent::Text(retry_prompt),
-                        timestamp: chrono::Utc::now(),
-                        metadata: HashMap::new(),
-                        formatted_author: None,
-                    };
-                    if let Err(error) = self.handle_message(retry).await {
-                        tracing::error!(
-                            %error,
-                            channel_id = %self.id,
-                            "autonomy completion-contract retry failed"
-                        );
-                        break;
-                    }
-                    continue;
-                }
                 tracing::info!(channel_id = %self.id, "self-exiting channel finished all work, exiting");
                 break;
             }
@@ -1981,6 +1887,35 @@ impl Channel {
 
             tokio::select! {
                 Some(message) = self.message_rx.recv() => {
+                    if self.state.kind == ChannelKind::Autonomy
+                        && let Some(generation) = message
+                            .metadata
+                            .get(crate::agent::autonomy::AUTONOMY_GENERATION_KEY)
+                            .and_then(serde_json::Value::as_u64)
+                    {
+                        let epoch_start = message
+                            .metadata
+                            .get(crate::agent::autonomy::AUTONOMY_EPOCH_START_KEY)
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false);
+                        let current = self.state.autonomy_run().map(|run| run.generation);
+                        if current != Some(generation) {
+                            tracing::debug!(generation, ?current, "ignoring autonomy message for stale generation");
+                            continue;
+                        }
+                        if epoch_start && !self.begin_autonomy_epoch(generation).await {
+                            continue;
+                        }
+                        if self.autonomy_event_lagged {
+                            if let Err(error) = self.recover_lagged_autonomy_children().await {
+                                tracing::error!(%error, "failed to reconcile autonomy children on heartbeat");
+                            }
+                            self.autonomy_event_lagged = self
+                                .state
+                                .autonomy_run()
+                                .is_some_and(|run| run.has_active_children());
+                        }
+                    }
                     let config = self.deps.runtime_config.coalesce.load();
                     if self.should_coalesce(&message, &config) {
                         self.coalesce_buffer.push(message);
@@ -2022,6 +1957,9 @@ impl Channel {
                             }
                         }
                         crate::BroadcastRecvResult::Lagged(skipped) => {
+                            if self.state.kind == ChannelKind::Autonomy {
+                                self.autonomy_event_lagged = true;
+                            }
                             #[cfg(feature = "metrics")]
                             crate::telemetry::Metrics::global()
                                 .event_receiver_lagged_events_total
@@ -2041,6 +1979,11 @@ impl Channel {
                                     skipped,
                                     "channel event receiver lagged, dropping old events"
                                 );
+                            }
+                            if self.state.kind == ChannelKind::Autonomy
+                                && let Err(error) = self.recover_lagged_autonomy_children().await
+                            {
+                                tracing::error!(%error, "failed to recover autonomy children after event lag");
                             }
                         }
                         crate::BroadcastRecvResult::Closed => {
@@ -2535,13 +2478,14 @@ impl Channel {
             )
             .await?;
 
-        self.handle_agent_result(
-            turn_result.result,
-            &turn_result.skip_flag,
-            &turn_result.replied_flag,
-            false,
-        )
-        .await;
+        let _ = self
+            .handle_agent_result(
+                turn_result.result,
+                &turn_result.skip_flag,
+                &turn_result.replied_flag,
+                false,
+            )
+            .await;
         if turn_result
             .replied_flag
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -2676,7 +2620,13 @@ impl Channel {
         let parsed_command = if message.source == "system" {
             crate::commands::ParseResult::NotACommand
         } else {
-            crate::commands::REGISTRY.parse(&raw_text)
+            crate::commands::REGISTRY.parse_addressed(
+                &raw_text,
+                message
+                    .metadata
+                    .get("telegram_bot_username")
+                    .and_then(serde_json::Value::as_str),
+            )
         };
         match &parsed_command {
             crate::commands::ParseResult::Command(cmd) => {
@@ -2835,7 +2785,11 @@ impl Channel {
             *reply_target = extract_message_id(&message);
         }
 
-        let is_retrigger = message.source == "system";
+        let is_autonomy_heartbeat = self.state.kind == ChannelKind::Autonomy
+            && message
+                .metadata
+                .contains_key(crate::agent::autonomy::AUTONOMY_GENERATION_KEY);
+        let is_retrigger = message.source == "system" && !is_autonomy_heartbeat;
         let attachment_content = if !attachments.is_empty() {
             if let Some(ref saved_data) = saved_attachment_data {
                 // Reuse already-downloaded bytes for images/text; audio still
@@ -2886,13 +2840,25 @@ impl Channel {
             )
             .await?;
 
-        self.handle_agent_result(
-            turn_result.result,
-            &turn_result.skip_flag,
-            &turn_result.replied_flag,
-            is_retrigger,
-        )
-        .await;
+        let delivered_text = self
+            .handle_agent_result(
+                turn_result.result,
+                &turn_result.skip_flag,
+                &turn_result.replied_flag,
+                is_retrigger,
+            )
+            .await;
+
+        if is_retrigger && let Some(text) = delivered_text.as_ref() {
+            self.state
+                .history
+                .write()
+                .await
+                .push(rig::message::Message::Assistant {
+                    id: None,
+                    content: OneOrMany::one(rig::message::AssistantContent::text(text)),
+                });
+        }
 
         if turn_result
             .replied_flag
@@ -2927,75 +2893,80 @@ impl Channel {
             .await;
         }
 
-        // After retrigger turns, persist a fallback summary only when we don't
-        // already have the LLM's actual relay text in history.
-        //
-        // PromptCancelled + reply tool is now handled in apply_history_after_turn:
-        // it extracts the reply content from tool args and records that exact
-        // assistant message (while dropping scaffolding). In that common success
-        // path, we skip summary injection to avoid replacing user-visible wording
-        // with raw worker output.
-        //
-        // If relay failed (replied=false), or if we couldn't extract a clean
-        // reply content payload, this fallback preserves a compact background
-        // result record for the next user turn.
         if is_retrigger {
             let replied = turn_result
                 .replied_flag
                 .load(std::sync::atomic::Ordering::Relaxed);
+            let delivered = replied
+                || turn_result
+                    .delivered_flag
+                    .load(std::sync::atomic::Ordering::Acquire)
+                || delivered_text.is_some();
+            let skipped = turn_result
+                .skip_flag
+                .load(std::sync::atomic::Ordering::Relaxed);
             let is_autonomy = self.state.kind == ChannelKind::Autonomy;
-            if replied && turn_result.retrigger_reply_preserved {
+            if delivered && turn_result.retrigger_reply_preserved {
                 tracing::debug!(
                     channel_id = %self.id,
                     "skipping retrigger summary injection; relay reply already preserved"
                 );
-            } else {
-                // Extract the result summaries from the metadata we attached in
-                // flush_pending_retrigger, so we record only the substance (not
-                // the retrigger instructions/template scaffolding).
+            } else if is_autonomy {
                 let summary = message
                     .metadata
                     .get("retrigger_result_summary")
                     .and_then(|v| v.as_str())
                     .unwrap_or("[background work completed]");
-
-                let record = if replied {
-                    summary.to_string()
-                } else if is_autonomy {
-                    // Autonomy channels have no reply tool, so a retrigger turn
-                    // never "replies". The results were already presented as
-                    // run context in the retrigger message; record a compact
-                    // copy so they survive into the run's history without the
-                    // user-relay framing.
-                    tracing::debug!(
-                        channel_id = %self.id,
-                        "autonomy retrigger produced no reply; results preserved in history as run context"
-                    );
-                    format!("[background process results]\n{summary}")
-                } else {
-                    tracing::warn!(
-                        channel_id = %self.id,
-                        "retrigger relay failed, preserving result in history for next turn"
-                    );
-                    format!(
-                        "[background work completed but relay to user failed — include this in your next response]\n{summary}"
-                    )
-                };
-
+                let record = format!("[background process results]\n{summary}");
                 let mut history = self.state.history.write().await;
-                // Replace the synthetic bridge message (if present) with the summary
-                // to avoid consecutive assistant messages in history.
                 let replaced = pop_retrigger_bridge_message(&mut history);
                 tracing::debug!(
                     channel_id = %self.id,
                     replaced_bridge = replaced,
-                    replied,
-                    "injecting retrigger summary into history"
+                    "preserving autonomy process results in run history"
                 );
                 history.push(rig::message::Message::Assistant {
                     id: None,
                     content: OneOrMany::one(rig::message::AssistantContent::text(record)),
                 });
+            } else if !delivered && !skipped && self.allows_direct_reply() {
+                let relay_attempt = message
+                    .metadata
+                    .get("retrigger_relay_attempt")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                if relay_attempt < RETRIGGER_RELAY_RETRY_LIMIT {
+                    let mut retry = message.clone();
+                    retry.id = uuid::Uuid::new_v4().to_string();
+                    retry.timestamp = chrono::Utc::now();
+                    retry.metadata.insert(
+                        "retrigger_relay_attempt".to_string(),
+                        serde_json::json!(relay_attempt + 1),
+                    );
+                    if let Err(error) = self.self_tx.try_send(retry) {
+                        tracing::warn!(
+                            channel_id = %self.id,
+                            %error,
+                            "failed to queue background result relay retry"
+                        );
+                        self.deferred_retriggers.push_back(message.clone());
+                        self.notify_retrigger_delivery_failure().await;
+                    } else {
+                        tracing::warn!(
+                            channel_id = %self.id,
+                            attempt = relay_attempt + 1,
+                            "background result relay failed; queued bounded retry"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        channel_id = %self.id,
+                        attempts = relay_attempt + 1,
+                        "background result relay retries exhausted"
+                    );
+                    self.deferred_retriggers.push_back(message.clone());
+                    self.notify_retrigger_delivery_failure().await;
+                }
             }
 
             // Mark the completed items as relayed in the status block so their
@@ -3006,7 +2977,7 @@ impl Channel {
             // now recorded in history (either via the reply path or the record
             // above), so marking them prevents the same results being
             // re-injected on every subsequent turn of the run.
-            if (replied || is_autonomy)
+            if (delivered || is_autonomy)
                 && let Some(ids) = message
                     .metadata
                     .get("retrigger_process_ids")
@@ -3030,6 +3001,7 @@ impl Channel {
             self.message_count += 1;
             self.check_memory_persistence().await;
             self.claim_home_channel_if_unset().await;
+            self.queue_deferred_retrigger();
         }
 
         Ok(())
@@ -3356,20 +3328,44 @@ impl Channel {
         let opencode_enabled = rc.opencode.load().enabled;
         let mcp_tool_names = self.deps.mcp_manager.get_tool_names().await;
         let worker_context = self.state.worker_context_settings.read().await.clone();
-        let worker_capabilities = prompt_engine.render_worker_capabilities(
-            browser_enabled,
-            web_search_enabled,
-            opencode_enabled,
-            &mcp_tool_names,
-            &worker_context,
-        )?;
+        let autonomy_level = self
+            .deps
+            .runtime_config
+            .autonomy
+            .load()
+            .level
+            .min(**self.deps.autonomy_ceiling.load());
+        let worker_capabilities = if self.state.kind == ChannelKind::Autonomy
+            && autonomy_level != crate::config::AutonomyLevel::Act
+        {
+            String::new()
+        } else {
+            prompt_engine.render_worker_capabilities(
+                browser_enabled,
+                web_search_enabled,
+                opencode_enabled,
+                &mcp_tool_names,
+                &worker_context,
+                self.state.kind != ChannelKind::Autonomy,
+            )?
+        };
 
         // Time no longer renders here — it rides on the current user message
         // envelope instead, so this prompt stays byte-stable across turns
         // (see `with_time_envelope`).
         let system_info = self.build_system_info().await;
+        let registry_workers = self
+            .state
+            .deps
+            .process_control_registry
+            .list_worker_snapshots()
+            .await
+            .into_iter()
+            .filter(|worker| worker.provenance.origin_channel_id.as_ref() == Some(&self.id))
+            .collect();
         let status_text = {
-            let status = self.state.status_block.read().await;
+            let mut status = self.state.status_block.write().await;
+            status.replace_workers_from_registry(registry_workers);
             status.render_with_context(None, Some(&system_info))
         };
 
@@ -3438,6 +3434,7 @@ impl Channel {
                 active_goals,
                 execution_mode,
                 authority,
+                autonomy_channel: self.state.kind == ChannelKind::Autonomy,
             })?;
 
         segmented.adopt_appended(
@@ -3472,10 +3469,11 @@ impl Channel {
     ) -> Result<AgentTurnResult> {
         let skip_flag = crate::tools::new_skip_flag();
         let replied_flag = crate::tools::new_replied_flag();
+        let delivered_flag = crate::tools::new_delivered_flag();
         // Autonomy runs never talk to users — no reply tool. Output goes to
         // task state, working memory, and autonomy_complete.
-        let allow_direct_reply =
-            self.state.kind != ChannelKind::Autonomy && !self.suppress_plaintext_fallback();
+        let allow_direct_reply = self.allows_direct_reply();
+        let allow_ask = allow_direct_reply && !is_retrigger;
 
         // Set the originating channel on the delegation tool so task completion
         // notifications route back to this conversation.
@@ -3506,53 +3504,66 @@ impl Channel {
         // them on the table to be talked into calling.
         let sender_is_authority = crate::commands::dispatch::sender_is_authority(&current_inbound);
 
-        match self.resolved_settings.delegation {
-            DelegationMode::Standard => {
-                // Current behavior - standard channel tools only
-                if let Err(error) = crate::tools::add_channel_tools(
-                    &self.tool_server,
-                    self.state.clone(),
-                    routed_sender,
-                    reply_target,
-                    conversation_id,
-                    skip_flag.clone(),
-                    replied_flag.clone(),
-                    self.deps.cron_tool.clone(),
-                    send_agent_message_tool,
-                    allow_direct_reply,
-                    adapter.map(|s| s.to_string()),
-                    slack_thread_ts.as_deref(),
-                    self.state.cron_outcome.clone(),
-                    sender_is_authority,
-                )
-                .await
-                {
-                    tracing::error!(%error, "failed to add channel tools");
-                    return Err(AgentError::Other(error.into()).into());
-                }
+        if self.state.kind == ChannelKind::Autonomy {
+            if let Err(error) =
+                crate::tools::add_autonomy_tools(&self.tool_server, self.state.clone()).await
+            {
+                tracing::error!(%error, "failed to add autonomy tools");
+                return Err(AgentError::Other(error.into()).into());
             }
-            DelegationMode::Direct => {
-                // Full tool access (cortex chat style)
-                if let Err(error) = crate::tools::add_direct_mode_tools(
-                    &self.tool_server,
-                    self.state.clone(),
-                    routed_sender,
-                    reply_target,
-                    conversation_id,
-                    skip_flag.clone(),
-                    replied_flag.clone(),
-                    self.deps.cron_tool.clone(),
-                    send_agent_message_tool,
-                    allow_direct_reply,
-                    adapter.map(|s| s.to_string()),
-                    slack_thread_ts.as_deref(),
-                    self.state.cron_outcome.clone(),
-                    sender_is_authority,
-                )
-                .await
-                {
-                    tracing::error!(%error, "failed to add direct mode tools");
-                    return Err(AgentError::Other(error.into()).into());
+        } else {
+            match self.resolved_settings.delegation {
+                DelegationMode::Standard => {
+                    // Current behavior - standard channel tools only
+                    if let Err(error) = crate::tools::add_channel_tools(
+                        &self.tool_server,
+                        self.state.clone(),
+                        routed_sender,
+                        reply_target,
+                        conversation_id,
+                        skip_flag.clone(),
+                        replied_flag.clone(),
+                        delivered_flag.clone(),
+                        self.deps.cron_tool.clone(),
+                        send_agent_message_tool,
+                        allow_direct_reply,
+                        allow_ask,
+                        adapter.map(|s| s.to_string()),
+                        slack_thread_ts.as_deref(),
+                        self.state.cron_outcome.clone(),
+                        sender_is_authority,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, "failed to add channel tools");
+                        return Err(AgentError::Other(error.into()).into());
+                    }
+                }
+                DelegationMode::Direct => {
+                    // Full tool access (cortex chat style)
+                    if let Err(error) = crate::tools::add_direct_mode_tools(
+                        &self.tool_server,
+                        self.state.clone(),
+                        routed_sender,
+                        reply_target,
+                        conversation_id,
+                        skip_flag.clone(),
+                        replied_flag.clone(),
+                        delivered_flag.clone(),
+                        self.deps.cron_tool.clone(),
+                        send_agent_message_tool,
+                        allow_direct_reply,
+                        allow_ask,
+                        adapter.map(|s| s.to_string()),
+                        slack_thread_ts.as_deref(),
+                        self.state.cron_outcome.clone(),
+                        sender_is_authority,
+                    )
+                    .await
+                    {
+                        tracing::error!(%error, "failed to add direct mode tools");
+                        return Err(AgentError::Other(error.into()).into());
+                    }
                 }
             }
         }
@@ -3758,12 +3769,17 @@ impl Channel {
             }
         }
 
-        let remove_result = match self.resolved_settings.delegation {
-            DelegationMode::Direct => {
-                crate::tools::remove_direct_mode_tools(&self.tool_server, allow_direct_reply).await
-            }
-            DelegationMode::Standard => {
-                crate::tools::remove_channel_tools(&self.tool_server, allow_direct_reply).await
+        let remove_result = if self.state.kind == ChannelKind::Autonomy {
+            crate::tools::remove_direct_mode_tools(&self.tool_server, allow_direct_reply).await
+        } else {
+            match self.resolved_settings.delegation {
+                DelegationMode::Direct => {
+                    crate::tools::remove_direct_mode_tools(&self.tool_server, allow_direct_reply)
+                        .await
+                }
+                DelegationMode::Standard => {
+                    crate::tools::remove_channel_tools(&self.tool_server, allow_direct_reply).await
+                }
             }
         };
         if let Err(error) = remove_result {
@@ -3788,14 +3804,18 @@ impl Channel {
             result,
             skip_flag,
             replied_flag,
+            delivered_flag,
             retrigger_reply_preserved: applied_history.retrigger_reply_preserved,
             reply_text: applied_history.reply_text,
         })
     }
 
     /// Send outbound text and record send metrics.
-    async fn send_outbound_text(&self, text: String, error_context: &str) {
-        match self.send_routed(OutboundResponse::Text(text)).await {
+    async fn send_outbound_text(&self, text: String, error_context: &str) -> bool {
+        match self
+            .send_routed_confirmed(OutboundResponse::Text(text))
+            .await
+        {
             Ok(()) => {
                 #[cfg(feature = "metrics")]
                 {
@@ -3805,6 +3825,7 @@ impl Channel {
                         .with_label_values(&[&self.deps.agent_id, channel_type])
                         .inc();
                 }
+                true
             }
             Err(error) => {
                 #[cfg(feature = "metrics")]
@@ -3816,6 +3837,44 @@ impl Channel {
                         .inc();
                 }
                 tracing::error!(%error, channel_id = %self.id, "{error_context}");
+                false
+            }
+        }
+    }
+
+    async fn notify_retrigger_delivery_failure(&self) {
+        let text = "Background work finished, but I couldn't deliver its result. The result is still pending; ask me to retry.";
+        if self
+            .send_outbound_text(text.to_string(), "failed to send background result notice")
+            .await
+        {
+            self.state
+                .conversation_logger
+                .log_bot_message(&self.state.channel_id, text);
+        }
+    }
+
+    fn queue_deferred_retrigger(&mut self) {
+        let Some(mut message) = self.deferred_retriggers.pop_front() else {
+            return;
+        };
+        message.id = uuid::Uuid::new_v4().to_string();
+        message.timestamp = chrono::Utc::now();
+        message
+            .metadata
+            .insert("retrigger_relay_attempt".to_string(), serde_json::json!(0));
+        match self.self_tx.try_send(message) {
+            Ok(()) => tracing::info!(
+                channel_id = %self.id,
+                "retrying deferred background result after user activity"
+            ),
+            Err(error) => {
+                let message = error.into_inner();
+                tracing::warn!(
+                    channel_id = %self.id,
+                    "failed to queue deferred background result retry"
+                );
+                self.deferred_retriggers.push_front(message);
             }
         }
     }
@@ -3833,7 +3892,8 @@ impl Channel {
         skip_flag: &crate::tools::SkipFlag,
         replied_flag: &crate::tools::RepliedFlag,
         is_retrigger: bool,
-    ) {
+    ) -> Option<String> {
+        let mut delivered_text = None;
         #[cfg(feature = "metrics")]
         let metrics = crate::telemetry::Metrics::global();
         #[cfg(feature = "metrics")]
@@ -3892,14 +3952,18 @@ impl Channel {
                                 if extracted.is_some() {
                                     tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in retrigger fallback");
                                 }
-                                self.state
-                                    .conversation_logger
-                                    .log_bot_message(&self.state.channel_id, &final_text);
-                                self.send_outbound_text(
-                                    final_text,
-                                    "failed to send retrigger fallback reply",
-                                )
-                                .await;
+                                if self
+                                    .send_outbound_text(
+                                        final_text.clone(),
+                                        "failed to send retrigger fallback reply",
+                                    )
+                                    .await
+                                {
+                                    self.state
+                                        .conversation_logger
+                                        .log_bot_message(&self.state.channel_id, &final_text);
+                                    delivered_text = Some(final_text);
+                                }
                             }
                         }
                     } else {
@@ -3956,15 +4020,18 @@ impl Channel {
                                 extracted.as_deref().unwrap_or(text),
                                 source,
                             );
-                            if !final_text.is_empty() {
+                            if !final_text.is_empty()
+                                && self
+                                    .send_outbound_text(
+                                        final_text.clone(),
+                                        "failed to send retrigger fallback reply",
+                                    )
+                                    .await
+                            {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                self.send_outbound_text(
-                                    final_text,
-                                    "failed to send retrigger fallback reply",
-                                )
-                                .await;
+                                delivered_text = Some(final_text);
                             }
                         }
                     } else {
@@ -4020,8 +4087,15 @@ impl Channel {
                                     Some(self.agent_display_name()),
                                     tool_calls_json,
                                 );
-                            self.send_outbound_text(final_text, "failed to send fallback reply")
-                                .await;
+                            if self
+                                .send_outbound_text(
+                                    final_text.clone(),
+                                    "failed to send fallback reply",
+                                )
+                                .await
+                            {
+                                delivered_text = Some(final_text);
+                            }
                         }
                     }
 
@@ -4056,11 +4130,12 @@ impl Channel {
                     .channel_errors_total
                     .with_label_values(&[metrics_agent_id, metrics_channel_type, "llm_error"])
                     .inc();
-                // Send error to user so they know something went wrong
-                let error_msg = format!("I encountered an error: {}", error);
-                self.send_routed(OutboundResponse::Text(error_msg))
-                    .await
-                    .ok();
+                if !is_retrigger {
+                    let error_msg = format!("I encountered an error: {}", error);
+                    self.send_routed(OutboundResponse::Text(error_msg))
+                        .await
+                        .ok();
+                }
                 tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
             }
         }
@@ -4069,6 +4144,7 @@ impl Channel {
         self.send_routed(OutboundResponse::Status(crate::StatusUpdate::StopTyping))
             .await
             .ok();
+        delivered_text
     }
 
     /// Handle a process event (branch results, worker completions, status updates).
@@ -4138,6 +4214,9 @@ impl Channel {
                     self.branch_reply_targets.remove(branch_id);
                     return Ok(());
                 }
+                if let Some(run) = self.state.autonomy_run() {
+                    run.settle_child(crate::agent::autonomy::AutonomyChild::Branch(*branch_id));
+                }
 
                 #[cfg(feature = "metrics")]
                 crate::telemetry::Metrics::global()
@@ -4184,28 +4263,10 @@ impl Channel {
                 self.branch_reply_targets.remove(branch_id);
             }
             ProcessEvent::WorkerStarted { .. } => {}
-            ProcessEvent::WorkerStatus {
-                worker_id, status, ..
-            } => {
-                if let Some(crate::conversation::WorkerTransitionResult::Conflict { current }) =
-                    run_logger.log_worker_status(*worker_id, status).await?
-                    && !current.is_terminal()
-                    && current != crate::conversation::WorkerLifecycle::Running
-                {
-                    tracing::debug!(%worker_id, lifecycle = current.as_str(), "worker resume status arrived outside waiting state");
-                }
-            }
-            ProcessEvent::WorkerIdle { worker_id, .. } => {
-                if let crate::conversation::WorkerTransitionResult::Conflict { current } =
-                    run_logger.log_worker_idle(*worker_id).await?
-                    && !current.is_terminal()
-                    && current != crate::conversation::WorkerLifecycle::WaitingForInput
-                {
-                    tracing::debug!(%worker_id, lifecycle = current.as_str(), "worker idle event arrived outside running state");
-                }
-            }
+            ProcessEvent::WorkerStatus { .. } | ProcessEvent::WorkerIdle { .. } => {}
             ProcessEvent::WorkerComplete {
                 worker_id,
+                active_operation,
                 notify,
                 outcome_kind,
                 outcome_version,
@@ -4240,7 +4301,14 @@ impl Channel {
                 }
                 self.consumed_worker_outcomes
                     .insert(*worker_id, terminal.outcome_version);
-                self.state.worker_handles.write().await.remove(worker_id);
+                if let Some(run) = self.state.autonomy_run()
+                    && let Some(operation) = active_operation
+                {
+                    run.settle_child(crate::agent::autonomy::AutonomyChild::WorkerOperation {
+                        worker_id: *worker_id,
+                        operation_id: operation.operation_id,
+                    });
+                }
                 let result = terminal.result;
                 let success = terminal.outcome_kind.is_success();
 
@@ -4286,10 +4354,6 @@ impl Channel {
                     }
                 }
 
-                self.state.active_workers.write().await.remove(worker_id);
-                self.state.worker_inputs.write().await.remove(worker_id);
-                self.state.worker_injections.write().await.remove(worker_id);
-
                 // Record worker completion in working memory.
                 let worker_summary = if result.len() > 200 {
                     format!("{}...", &result[..200])
@@ -4327,17 +4391,24 @@ impl Channel {
 
                 tracing::info!(worker_id = %worker_id, "worker completed, result queued for retrigger");
             }
-            ProcessEvent::OpenCodeSessionCreated {
+            ProcessEvent::OpenCodeSessionCreated { .. } => {}
+            ProcessEvent::WorkerOperationResult {
                 worker_id,
-                session_id,
-                port,
+                operation_id,
+                result,
                 ..
             } => {
-                run_logger.log_opencode_metadata(*worker_id, session_id, *port);
-            }
-            ProcessEvent::WorkerInitialResult {
-                worker_id, result, ..
-            } => {
+                let child = crate::agent::autonomy::AutonomyChild::WorkerOperation {
+                    worker_id: *worker_id,
+                    operation_id: *operation_id,
+                };
+                if self.state.kind == ChannelKind::Autonomy
+                    && let Some(run) = self.state.autonomy_run()
+                    && !run.owns_child(child)
+                {
+                    tracing::debug!(%worker_id, "duplicate or stale autonomy worker result ignored");
+                    return Ok(());
+                }
                 // Interactive worker completed a task (initial or follow-up)
                 // but stays alive for more input. Deliver the result to the
                 // channel without removing the worker from the active set.
@@ -4347,6 +4418,9 @@ impl Channel {
                     result: result.clone(),
                     success: true,
                 });
+                if let Some(run) = self.state.autonomy_run() {
+                    run.settle_child(child);
+                }
                 should_retrigger = true;
                 tracing::info!(
                     worker_id = %worker_id,
@@ -4363,6 +4437,10 @@ impl Channel {
         // Multiple branch/worker completions within the debounce window are
         // coalesced into a single retrigger to prevent message spam.
         if should_retrigger {
+            if self.state.kind == ChannelKind::Autonomy && self.state.autonomy_run().is_none() {
+                self.deps.autonomy_control.request_check();
+                return Ok(());
+            }
             let cap_applies = self.state.kind.caps_retriggers();
             if cap_applies && self.retrigger_count >= MAX_RETRIGGERS_PER_TURN {
                 tracing::warn!(
@@ -4661,6 +4739,9 @@ impl Channel {
     /// trigger — reflection included — obeys the conversation's memory
     /// persistence controls.
     async fn check_memory_persistence(&mut self) {
+        if self.state.kind == ChannelKind::Autonomy {
+            return;
+        }
         let config = **self.deps.runtime_config.memory_persistence.load();
         let persistence_enabled = config.enabled
             && config.message_interval != 0
@@ -5174,6 +5255,7 @@ mod tests {
         let event = ProcessEvent::WorkerStatus {
             agent_id: Arc::from("agent"),
             worker_id: uuid::Uuid::new_v4(),
+            worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
             channel_id: Some(channel_id.clone()),
             status: "running".to_string(),
         };
@@ -5203,6 +5285,8 @@ mod tests {
         let event = ProcessEvent::WorkerComplete {
             agent_id: Arc::from("agent"),
             worker_id: uuid::Uuid::new_v4(),
+            worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
+            active_operation: None,
             channel_id: Some(channel_id.clone()),
             result: "done".to_string(),
             notify: true,
@@ -5222,6 +5306,8 @@ mod tests {
         let event = ProcessEvent::WorkerComplete {
             agent_id: Arc::from("agent"),
             worker_id: uuid::Uuid::new_v4(),
+            worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
+            active_operation: None,
             channel_id: Some(Arc::from("channel-b")),
             result: "done".to_string(),
             notify: true,
@@ -5241,6 +5327,8 @@ mod tests {
         let event = ProcessEvent::WorkerComplete {
             agent_id: Arc::from("agent"),
             worker_id: uuid::Uuid::new_v4(),
+            worker_registration_id: crate::agent::process_control::WorkerRegistrationId::new(1),
+            active_operation: None,
             channel_id: None,
             result: "done".to_string(),
             notify: true,

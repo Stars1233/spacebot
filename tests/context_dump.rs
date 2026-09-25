@@ -128,6 +128,7 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         )),
         wake_def_store: Arc::new(spacebot::wakes::WakeDefStore::new(db.sqlite.clone())),
         autonomy_run_store: Arc::new(spacebot::wakes::AutonomyRunStore::new(db.sqlite.clone())),
+        autonomy_control: spacebot::agent::autonomy::AutonomyControl::default(),
         project_store: Arc::new(spacebot::projects::ProjectStore::new(instance_pool.clone())),
         cron_tool: None,
         runtime_config,
@@ -212,6 +213,7 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
             opencode_enabled,
             &[],
             &spacebot::conversation::settings::WorkerContextMode::default(),
+            true,
         )
         .expect("failed to render worker capabilities");
 
@@ -288,11 +290,6 @@ async fn dump_channel_context() {
         history: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         history_fence: Arc::new(spacebot::agent::chronicle::HistoryFence::new()),
         active_branches: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        worker_handles: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        active_workers: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        worker_injections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        reserved_tasks: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         status_block,
         deps: deps.clone(),
         conversation_logger,
@@ -326,8 +323,10 @@ async fn dump_channel_context() {
         "test-conversation",
         skip_flag,
         replied_flag,
+        spacebot::tools::new_delivered_flag(),
         None,
         None,
+        true,
         true,
         None,
         None,
@@ -467,7 +466,11 @@ async fn dump_worker_context() {
 
     let worker_tool_server = spacebot::tools::create_worker_tool_server(
         deps.agent_id.clone(),
-        worker_id,
+        spacebot::agent::process_control::WorkerCallbackContext {
+            worker_id,
+            registration_id: spacebot::agent::process_control::WorkerRegistrationId::new(1),
+        },
+        deps.process_control_registry.clone(),
         None,
         deps.task_store.clone(),
         deps.event_tx.clone(),
@@ -549,11 +552,6 @@ async fn dump_all_contexts() {
         history: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         history_fence: Arc::new(spacebot::agent::chronicle::HistoryFence::new()),
         active_branches: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        worker_handles: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        active_workers: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        worker_injections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        reserved_tasks: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         status_block: Arc::new(tokio::sync::RwLock::new(
             spacebot::agent::status::StatusBlock::new(),
         )),
@@ -588,8 +586,10 @@ async fn dump_all_contexts() {
         "test",
         skip_flag,
         replied_flag,
+        spacebot::tools::new_delivered_flag(),
         None,
         None,
+        true,
         true,
         None,
         None,
@@ -668,9 +668,14 @@ async fn dump_all_contexts() {
         .expect("failed to render worker prompt")
         .text;
     let brave_search_key = (**rc.brave_search_key.load()).clone();
+    let worker_id = uuid::Uuid::new_v4();
     let worker_tool_server = spacebot::tools::create_worker_tool_server(
         deps.agent_id.clone(),
-        uuid::Uuid::new_v4(),
+        spacebot::agent::process_control::WorkerCallbackContext {
+            worker_id,
+            registration_id: spacebot::agent::process_control::WorkerRegistrationId::new(1),
+        },
+        deps.process_control_registry.clone(),
         None,
         deps.task_store.clone(),
         deps.event_tx.clone(),

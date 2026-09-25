@@ -2,7 +2,9 @@
 
 use crate::config::MattermostPermissions;
 use crate::messaging::apply_runtime_adapter_to_conversation_id;
-use crate::messaging::traits::{HistoryMessage, InboundStream, Messaging};
+use crate::messaging::traits::{
+    HistoryMessage, InboundStream, Messaging, unsupported_broadcast_variant_error,
+};
 use crate::{InboundMessage, MessageContent, OutboundResponse, StatusUpdate};
 
 use anyhow::Context as _;
@@ -659,7 +661,10 @@ impl Messaging for MattermostAdapter {
         let channel_id = self.extract_channel_id(message)?;
 
         match response {
-            OutboundResponse::Text(text) => {
+            OutboundResponse::Text(text)
+            | OutboundResponse::ThreadReply { text, .. }
+            | OutboundResponse::Ephemeral { text, .. }
+            | OutboundResponse::RichMessage { text, .. } => {
                 self.stop_typing(channel_id).await;
                 // Use root_id for threading: prefer mattermost_root_id (when triggered from a
                 // threaded message) or REPLY_TO_MESSAGE_ID (set by channel.rs for branch/worker
@@ -892,11 +897,8 @@ impl Messaging for MattermostAdapter {
                 }
             }
 
-            _ => {
-                tracing::debug!(
-                    ?response,
-                    "mattermost adapter does not support this response type"
-                );
+            response => {
+                return Err(unsupported_broadcast_variant_error("mattermost", &response));
             }
         }
 
@@ -1209,7 +1211,12 @@ fn build_message_from_post(
     // Thread-reply-to-bot detection is handled asynchronously in the WS event
     // handler and may upgrade this to true after this function returns.
     let is_dm = post.channel_type.as_deref() == Some("D");
+    let is_command = matches!(
+        crate::commands::REGISTRY.parse(&post.message),
+        crate::commands::ParseResult::Command(_) | crate::commands::ParseResult::Usage(_, _)
+    );
     let mentions_bot = is_dm
+        || is_command
         || (!context.bot_username.is_empty()
             && post.message.contains(&format!("@{}", context.bot_username)));
     metadata.insert(
@@ -1805,6 +1812,21 @@ mod tests {
                 .get("mattermost_mentions_or_replies_to_bot")
                 .and_then(|v| v.as_bool()),
             Some(false),
+        );
+    }
+
+    #[test]
+    fn recognized_command_counts_as_direct_invocation() {
+        let mut post = post("user1", "chan1", Some("O"));
+        post.message = "/autonomy".into();
+        let message =
+            build_message_from_mattermost_post(&post, "bot", Some("team1"), &no_filters()).unwrap();
+        assert_eq!(
+            message
+                .metadata
+                .get("mattermost_mentions_or_replies_to_bot")
+                .and_then(serde_json::Value::as_bool),
+            Some(true)
         );
     }
 

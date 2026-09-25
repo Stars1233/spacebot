@@ -153,12 +153,6 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "fragments/system/autonomy_contract_retry") => {
             include_str!("../../prompts/en/fragments/system/autonomy_contract_retry.md.j2")
         }
-        ("en", "fragments/system/autonomy_soft_warning") => {
-            include_str!("../../prompts/en/fragments/system/autonomy_soft_warning.md.j2")
-        }
-        ("en", "fragments/system/autonomy_hard_timeout") => {
-            include_str!("../../prompts/en/fragments/system/autonomy_hard_timeout.md.j2")
-        }
         ("en", "fragments/system/profile_synthesis") => {
             include_str!("../../prompts/en/fragments/system/profile_synthesis.md.j2")
         }
@@ -185,6 +179,12 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         // Projects Context
         ("en", "fragments/projects_context") => {
             include_str!("../../prompts/en/fragments/projects_context.md.j2")
+        }
+        ("en", "fragments/opencode_task_management") => {
+            include_str!("../../prompts/en/fragments/opencode_task_management.md.j2")
+        }
+        ("en", "fragments/injected_task_context") => {
+            include_str!("../../prompts/en/fragments/injected_task_context.md.j2")
         }
 
         // Tool Descriptions

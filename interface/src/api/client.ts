@@ -217,6 +217,7 @@ export interface WorkerStartedEvent {
 	agent_id: string;
 	channel_id: string | null;
 	worker_id: string;
+	worker_registration_id: string;
 	task: string;
 	worker_type?: string;
 	interactive?: boolean;
@@ -227,6 +228,7 @@ export interface WorkerStatusEvent {
 	agent_id: string;
 	channel_id: string | null;
 	worker_id: string;
+	worker_registration_id: string;
 	status: string;
 }
 
@@ -235,6 +237,8 @@ export interface WorkerIdleEvent {
 	agent_id: string;
 	channel_id: string | null;
 	worker_id: string;
+	worker_registration_id: string;
+	operation_id: string;
 }
 
 export interface WorkerCompletedEvent {
@@ -242,8 +246,19 @@ export interface WorkerCompletedEvent {
 	agent_id: string;
 	channel_id: string | null;
 	worker_id: string;
+	worker_registration_id: string;
 	result: string;
 	success?: boolean;
+}
+
+export interface OpenCodeSessionCreatedEvent {
+	type: "opencode_session_created";
+	agent_id: string;
+	channel_id: string | null;
+	worker_id: string;
+	worker_registration_id: string;
+	session_id: string;
+	port: number;
 }
 
 export interface BranchStartedEvent {
@@ -298,6 +313,7 @@ export interface ToolStartedEvent {
 	channel_id: string | null;
 	process_type: ProcessType;
 	process_id: string;
+	worker_registration_id: string | null;
 	call_id: string;
 	tool_name: string;
 	args: string;
@@ -309,6 +325,7 @@ export interface ToolOutputEvent {
 	channel_id: string | null;
 	process_type: ProcessType;
 	process_id: string;
+	worker_registration_id: string | null;
 	/** Stable identifier matching the tool_call that initiated this stream. */
 	call_id: string;
 	tool_name: string;
@@ -322,6 +339,7 @@ export interface ToolCompletedEvent {
 	channel_id: string | null;
 	process_type: ProcessType;
 	process_id: string;
+	worker_registration_id: string | null;
 	call_id: string;
 	tool_name: string;
 	result: string;
@@ -354,6 +372,7 @@ export interface OpenCodePartUpdatedEvent {
 	type: "opencode_part_updated";
 	agent_id: string;
 	worker_id: string;
+	worker_registration_id: string;
 	part: OpenCodePart;
 }
 
@@ -362,6 +381,7 @@ export interface ProcessTextEvent {
 	agent_id: string;
 	process_type: ProcessType;
 	process_id: string;
+	worker_registration_id: string | null;
 	channel_id: string | null;
 	text: string;
 }
@@ -384,6 +404,7 @@ export type ApiEvent =
 	| WorkerStatusEvent
 	| WorkerIdleEvent
 	| WorkerCompletedEvent
+	| OpenCodeSessionCreatedEvent
 	| BranchStartedEvent
 	| BranchCompletedEvent
 	| ChronicleCheckpointEvent
@@ -464,8 +485,11 @@ export type ChannelStatusResponse = Record<string, StatusBlockSnapshot>;
 
 export interface WorkerStatusInfo {
 	id: string;
+	registration_id: string | number;
 	task: string;
 	status: string;
+	runtime_state: string;
+	routable: boolean;
 	started_at: string;
 	notify_on_complete: boolean;
 	tool_calls: number;
@@ -889,8 +913,6 @@ export interface AutonomySection {
 	active_hours: [number, number] | null;
 	max_turns: number;
 	max_tasks_per_run: number;
-	timeout_secs: number;
-	warn_secs: number;
 	run_history_count: number;
 	claim_unowned: boolean;
 }
@@ -955,8 +977,6 @@ export interface AutonomyUpdate {
 	active_hours?: number[];
 	max_turns?: number;
 	max_tasks_per_run?: number;
-	timeout_secs?: number;
-	warn_secs?: number;
 	run_history_count?: number;
 	claim_unowned?: boolean;
 }
@@ -2015,7 +2035,12 @@ export const api = {
 	deleteChannel: async (agentId: string, channelId: string) => {
 		const params = new URLSearchParams({ agent_id: agentId, channel_id: channelId });
 		const response = await apiFetch(`${getApiBase()}/channels?${params}`, { method: "DELETE" });
-		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		if (!response.ok) {
+			if (response.status === 409) {
+				throw new Error("Channel has attached workers and cannot be deleted yet.");
+			}
+			throw new Error(`API error: ${response.status}`);
+		}
 		return response.json() as Promise<{ success: boolean }>;
 	},
 	channelMessages: (channelId: string, limit = 20, before?: string) => {
@@ -2376,11 +2401,11 @@ export const api = {
 		return response.json() as Promise<{ status: string }>;
 	},
 
-	cancelProcess: async (channelId: string, processType: "worker" | "branch", processId: string) => {
+	cancelProcess: async (agentId: string, channelId: string, processType: "worker" | "branch", processId: string) => {
 		const response = await apiFetch(`${getApiBase()}/channels/cancel-process`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ channel_id: channelId, process_type: processType, process_id: processId }),
+			body: JSON.stringify({ agent_id: agentId, channel_id: channelId, process_type: processType, process_id: processId }),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);

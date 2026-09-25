@@ -105,10 +105,36 @@ impl Tool for CancelTool {
                     .process_id
                     .parse::<WorkerId>()
                     .map_err(|e| CancelError(format!("Invalid worker ID: {e}")))?;
-                self.state
-                    .cancel_worker_with_reason(worker_id, reason)
+                match self
+                    .state
+                    .deps
+                    .process_control_registry
+                    .cancel_worker_runtime(worker_id, reason, std::time::Duration::from_secs(2))
                     .await
-                    .map_err(CancelError)?;
+                {
+                    crate::agent::process_control::ControlActionResult::Cancelled => {}
+                    crate::agent::process_control::ControlActionResult::AlreadyTerminal => {
+                        return Ok(already_finished(args, "already finished".to_string()));
+                    }
+                    crate::agent::process_control::ControlActionResult::NotFound => {
+                        let terminal = self
+                            .state
+                            .process_run_logger
+                            .read_worker_terminal(worker_id)
+                            .await
+                            .map_err(|error| CancelError(error.to_string()))?
+                            .ok_or_else(|| CancelError(format!("Worker {worker_id} not found")))?;
+                        return Ok(already_finished(
+                            args,
+                            format!("already finished ({})", terminal.lifecycle.as_str()),
+                        ));
+                    }
+                    crate::agent::process_control::ControlActionResult::Conflict => {
+                        return Err(CancelError(format!(
+                            "Worker {worker_id} cancellation conflicted with its durable state"
+                        )));
+                    }
+                }
             }
             other => return Err(CancelError(format!("Unknown process type: {other}"))),
         }
@@ -132,5 +158,20 @@ impl Tool for CancelTool {
             process_id: args.process_id,
             message,
         })
+    }
+}
+
+/// Output for a worker that reached a terminal state before the cancel, so the
+/// caller does not treat a completed result as cancelled.
+fn already_finished(args: CancelArgs, status: String) -> CancelOutput {
+    let message = format!(
+        "{} {} {status}; nothing to cancel.",
+        args.process_type, args.process_id
+    );
+    CancelOutput {
+        cancelled: false,
+        process_type: args.process_type,
+        process_id: args.process_id,
+        message,
     }
 }

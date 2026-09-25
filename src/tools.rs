@@ -157,7 +157,8 @@ pub use project_manage::{
 pub use react::{ReactArgs, ReactError, ReactOutput, ReactTool};
 pub use read_skill::{ReadSkillArgs, ReadSkillError, ReadSkillOutput, ReadSkillTool};
 pub use reply::{
-    RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTarget, ReplyTool, new_replied_flag,
+    DeliveredFlag, RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTarget, ReplyTool,
+    new_delivered_flag, new_replied_flag,
 };
 pub use restart::{RestartArgs, RestartError, RestartOutput, RestartTool};
 pub use route::{RouteArgs, RouteError, RouteOutput, RouteTool};
@@ -237,7 +238,7 @@ use crate::goals::GoalStore;
 use crate::memory::MemorySearch;
 use crate::sandbox::Sandbox;
 use crate::tasks::TaskStore;
-use crate::{AgentId, ChannelId, ProcessEvent, ProcessId, RoutedSender, WorkerId};
+use crate::{AgentId, ChannelId, ProcessEvent, ProcessId, RoutedSender};
 use rig::tool::Tool as _;
 use rig::tool::server::{ToolServer, ToolServerHandle};
 use std::collections::{HashMap, VecDeque};
@@ -499,9 +500,11 @@ pub async fn add_channel_tools(
     conversation_id: impl Into<String>,
     skip_flag: SkipFlag,
     replied_flag: RepliedFlag,
+    delivered_flag: DeliveredFlag,
     cron_tool: Option<CronTool>,
     send_agent_message_tool: Option<SendAgentMessageTool>,
     allow_direct_reply: bool,
+    allow_ask: bool,
     current_adapter: Option<String>,
     slack_thread_ts: Option<&str>,
     cron_outcome: Option<crate::cron::CronOutcome>,
@@ -512,7 +515,7 @@ pub async fn add_channel_tools(
     let chronicle_channel_id = state.channel_id.to_string();
     let chronicle_pool = state.deps.sqlite_pool.clone();
     let compaction = **state.deps.runtime_config.compaction.load();
-    let autonomy_run = state.autonomy_run.clone();
+    let autonomy_run = state.autonomy_run();
 
     if allow_direct_reply {
         let agent_display_name = state
@@ -528,10 +531,18 @@ pub async fn add_channel_tools(
                 state.conversation_logger.clone(),
                 state.channel_id.clone(),
                 replied_flag.clone(),
-                agent_display_name.clone(),
+                agent_display_name,
                 state.deps.api_state.clone(),
             ))
             .await?;
+    }
+    if allow_ask {
+        let agent_display_name = state
+            .deps
+            .agent_names
+            .get(state.deps.agent_id.as_ref())
+            .cloned()
+            .unwrap_or_else(|| state.deps.agent_id.to_string());
         handle
             .add_tool(AskTool::new(
                 crate::questions::QuestionStore::new(state.deps.sqlite_pool.clone()),
@@ -580,13 +591,16 @@ pub async fn add_channel_tools(
             ))
             .await?;
     }
-    handle
-        .add_tool(SendFileTool::new(
-            response_tx.clone(),
-            state.deps.runtime_config.workspace_dir.clone(),
-            state.deps.sandbox.clone(),
-        ))
-        .await?;
+    if channel_kind == crate::agent::channel::ChannelKind::User {
+        handle
+            .add_tool(SendFileTool::new(
+                response_tx.clone(),
+                state.deps.runtime_config.workspace_dir.clone(),
+                state.deps.sandbox.clone(),
+                delivered_flag,
+            ))
+            .await?;
+    }
     handle
         .add_tool(ProjectManageTool::new(state.deps.project_store.clone()))
         .await?;
@@ -695,9 +709,11 @@ pub async fn add_direct_mode_tools(
     conversation_id: impl Into<String>,
     skip_flag: SkipFlag,
     replied_flag: RepliedFlag,
+    delivered_flag: DeliveredFlag,
     cron_tool: Option<CronTool>,
     send_agent_message_tool: Option<SendAgentMessageTool>,
     allow_direct_reply: bool,
+    allow_ask: bool,
     current_adapter: Option<String>,
     slack_thread_ts: Option<&str>,
     cron_outcome: Option<crate::cron::CronOutcome>,
@@ -712,9 +728,11 @@ pub async fn add_direct_mode_tools(
         conversation_id,
         skip_flag.clone(),
         replied_flag.clone(),
+        delivered_flag,
         cron_tool.clone(),
         send_agent_message_tool.clone(),
         allow_direct_reply,
+        allow_ask,
         current_adapter.clone(),
         slack_thread_ts,
         cron_outcome,
@@ -866,6 +884,226 @@ pub async fn add_direct_mode_tools(
     Ok(())
 }
 
+/// Add the resident autonomy channel's level-scoped capability set.
+pub async fn add_autonomy_tools(
+    handle: &ToolServerHandle,
+    state: ChannelState,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    let level = state
+        .deps
+        .runtime_config
+        .autonomy
+        .load()
+        .level
+        .min(**state.deps.autonomy_ceiling.load());
+    handle
+        .add_tool(memory_save_with_events(
+            state.deps.memory_search.clone(),
+            state.deps.agent_id.clone(),
+            state.deps.memory_event_tx.clone(),
+            Some(state.deps.working_memory.clone()),
+        ))
+        .await?;
+    handle
+        .add_tool(MemoryRecallTool::new(state.deps.memory_search.clone()))
+        .await?;
+    handle.add_tool(SpacebotDocsTool::new()).await?;
+    handle
+        .add_tool(FileReadTool::new(
+            state.deps.runtime_config.workspace_dir.clone(),
+            state.deps.sandbox.clone(),
+        ))
+        .await?;
+    handle
+        .add_tool(FileListTool::new(
+            state.deps.runtime_config.workspace_dir.clone(),
+            state.deps.sandbox.clone(),
+        ))
+        .await?;
+    handle
+        .add_tool(ReadSkillTool::new(state.deps.runtime_config.clone()))
+        .await?;
+    handle
+        .add_tool(SkillsSearchTool::new(state.deps.runtime_config.clone()))
+        .await?;
+    handle
+        .add_tool(GoalListTool::new(state.deps.goal_store.clone()))
+        .await?;
+    let Some(run) = state.autonomy_run() else {
+        return Ok(());
+    };
+    handle.add_tool(AutonomyCompleteTool::new(run)).await?;
+
+    let mut task_history =
+        TaskHistoryTool::new(state.deps.task_store.clone(), state.deps.agent_id.clone());
+    if let Some(api_state) = &state.deps.api_state {
+        task_history = task_history.with_api_state(api_state.clone());
+    }
+    handle
+        .add_tool(TaskListTool::new(
+            state.deps.task_store.clone(),
+            state.deps.agent_id.to_string(),
+        ))
+        .await?;
+    handle.add_tool(task_history).await?;
+    handle
+        .add_tool(WorkerInspectTool::new(
+            state.process_run_logger.clone(),
+            state.deps.agent_id.to_string(),
+        ))
+        .await?;
+
+    if level >= crate::config::AutonomyLevel::Suggest {
+        let mut task_create = TaskCreateTool::new(
+            state.deps.task_store.clone(),
+            state.deps.agent_id.to_string(),
+            "autonomy",
+        )
+        .with_execution_context(
+            state.deps.project_store.clone(),
+            state.deps.runtime_config.clone(),
+        );
+        let mut add_task_comment = AddTaskCommentTool::for_branch(
+            state.deps.task_store.clone(),
+            state.deps.agent_id.clone(),
+        );
+        if let Some(api_state) = &state.deps.api_state {
+            task_create = task_create.with_api_state(api_state.clone());
+            add_task_comment = add_task_comment.with_api_state(api_state.clone());
+        }
+        handle.add_tool(task_create).await?;
+        handle
+            .add_tool(TaskUpdateTool::for_autonomy(
+                state.deps.task_store.clone(),
+                state.deps.agent_id.clone(),
+                level,
+            ))
+            .await?;
+        handle.add_tool(add_task_comment).await?;
+    }
+
+    if let Some(key) = state
+        .deps
+        .runtime_config
+        .brave_search_key
+        .load()
+        .as_ref()
+        .clone()
+    {
+        handle.add_tool(WebSearchTool::new(key)).await?;
+    }
+    if let Some(store) = &state.deps.wiki_store {
+        handle.add_tool(WikiReadTool::new(store.clone())).await?;
+        handle.add_tool(WikiListTool::new(store.clone())).await?;
+        handle.add_tool(WikiSearchTool::new(store.clone())).await?;
+        handle.add_tool(WikiHistoryTool::new(store.clone())).await?;
+    }
+
+    if level == crate::config::AutonomyLevel::Act {
+        handle.add_tool(SpawnWorkerTool::new(state.clone())).await?;
+        handle.add_tool(RouteTool::new(state.clone())).await?;
+        handle.add_tool(CancelTool::new(state.clone())).await?;
+        let workspace = state.deps.runtime_config.workspace_dir.clone();
+        let sandbox = state.deps.sandbox.clone();
+        handle
+            .add_tool(ShellTool::new(workspace.clone(), sandbox.clone()))
+            .await?;
+        handle
+            .add_tool(FileWriteTool::new(workspace.clone(), sandbox.clone()))
+            .await?;
+        handle
+            .add_tool(FileEditTool::new(workspace, sandbox))
+            .await?;
+
+        let browser_config = state.deps.runtime_config.browser_config.load();
+        if browser_config.enabled {
+            let context = browser::BrowserContext::new(
+                if let Some(shared) = state
+                    .deps
+                    .runtime_config
+                    .shared_browser
+                    .as_ref()
+                    .filter(|_| browser_config.persist_session)
+                {
+                    shared.clone()
+                } else {
+                    browser::new_shared_browser_handle()
+                },
+                BrowserConfig::clone(&browser_config),
+                state.screenshot_dir.clone(),
+                state
+                    .deps
+                    .runtime_config
+                    .secrets
+                    .load()
+                    .as_ref()
+                    .as_ref()
+                    .cloned(),
+            );
+            handle
+                .add_tool(browser::BrowserLaunchTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserNavigateTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserSnapshotTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserClickTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserTypeTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserPressKeyTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserScreenshotTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserEvaluateTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserTabOpenTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserTabListTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserTabCloseTool {
+                    context: context.clone(),
+                })
+                .await?;
+            handle
+                .add_tool(browser::BrowserCloseTool { context })
+                .await?;
+        }
+    }
+
+    Ok(())
+}
+
 fn default_delivery_target_for_conversation(
     conversation_id: &str,
     slack_thread_ts: Option<&str>,
@@ -982,6 +1220,12 @@ pub async fn remove_direct_mode_tools(
     remove_optional_tool(handle, WikiListTool::NAME).await;
     remove_optional_tool(handle, WikiSearchTool::NAME).await;
     remove_optional_tool(handle, WikiHistoryTool::NAME).await;
+    remove_optional_tool(handle, TaskCreateTool::NAME).await;
+    remove_optional_tool(handle, TaskListTool::NAME).await;
+    remove_optional_tool(handle, TaskUpdateTool::NAME).await;
+    remove_optional_tool(handle, TaskHistoryTool::NAME).await;
+    remove_optional_tool(handle, AddTaskCommentTool::NAME).await;
+    remove_optional_tool(handle, WorkerInspectTool::NAME).await;
 
     Ok(())
 }
@@ -1211,7 +1455,8 @@ pub fn create_branch_tool_server(
 #[allow(clippy::too_many_arguments)]
 pub fn create_worker_tool_server(
     agent_id: AgentId,
-    worker_id: WorkerId,
+    callback: crate::agent::process_control::WorkerCallbackContext,
+    process_control_registry: Arc<crate::agent::process_control::ProcessControlRegistry>,
     channel_id: Option<ChannelId>,
     task_store: Arc<TaskStore>,
     event_tx: broadcast::Sender<ProcessEvent>,
@@ -1233,6 +1478,7 @@ pub fn create_worker_tool_server(
     process_run_logger: crate::conversation::ProcessRunLogger,
     interactive: bool,
 ) -> ToolServerHandle {
+    let worker_id = callback.worker_id;
     let mut server = ToolServer::new()
         .tool(
             ShellTool::new(workspace.clone(), sandbox.clone()).with_streaming(
@@ -1240,6 +1486,7 @@ pub fn create_worker_tool_server(
                 ProcessId::Worker(worker_id),
                 channel_id.clone(),
                 agent_id.clone(),
+                Some(callback.registration_id),
                 tool_call_registry,
             ),
         )
@@ -1261,6 +1508,8 @@ pub fn create_worker_tool_server(
                 event_tx.clone(),
                 process_run_logger,
                 interactive,
+                callback,
+                process_control_registry,
             );
             if let Some(store) = runtime_config.secrets.load().as_ref() {
                 status_tool = status_tool.with_tool_secrets(store.tool_secret_pairs(&agent_id));
@@ -1765,6 +2014,7 @@ mod tests {
             process_id,
             None,
             std::sync::Arc::<str>::from("agent"),
+            None,
             registry,
         );
         let args = shell::ShellArgs {
@@ -1812,6 +2062,7 @@ mod tests {
             process_id.clone(),
             None,
             std::sync::Arc::<str>::from("agent"),
+            None,
             registry.clone(),
         );
 
@@ -1872,6 +2123,7 @@ mod tests {
             process_id,
             None,
             std::sync::Arc::<str>::from("agent"),
+            None,
             registry,
         );
 
