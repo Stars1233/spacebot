@@ -579,17 +579,23 @@ impl TaskStore {
         row.map(revision_from_row).transpose()
     }
 
-    /// Complete revision snapshots for an internal task execution briefing.
-    pub(crate) async fn all_revisions(&self, task_number: i64) -> Result<Vec<TaskRevision>> {
+    /// The most recent `limit` revisions with their snapshots, returned
+    /// oldest-first.
+    pub(crate) async fn recent_revisions(
+        &self,
+        task_number: i64,
+        limit: i64,
+    ) -> Result<Vec<TaskRevision>> {
         let rows = sqlx::query(&format!(
-            "{REVISION_SELECT_COLUMNS} FROM task_revisions \
+            "SELECT * FROM ({REVISION_SELECT_COLUMNS} FROM task_revisions \
              WHERE task_id = (SELECT id FROM tasks WHERE task_number = ?) \
-             ORDER BY revision ASC"
+             ORDER BY revision DESC LIMIT ?) ORDER BY revision ASC"
         ))
         .bind(task_number)
+        .bind(limit.clamp(1, MAX_REVISION_PAGE))
         .fetch_all(self.pool())
         .await
-        .context("failed to load complete task revision history")?;
+        .context("failed to list recent task revisions")?;
 
         rows.into_iter().map(revision_from_row).collect()
     }
@@ -808,6 +814,36 @@ mod tests {
             .await
             .expect("history should load");
         assert_eq!(revisions.len(), 2, "a no-op must not append a revision");
+    }
+
+    #[tokio::test]
+    async fn recent_revisions_return_the_newest_snapshots_oldest_first() {
+        let (store, number) = store_with_task().await;
+        for index in 0..6 {
+            store
+                .update_with_status_transition(
+                    number,
+                    UpdateTaskInput {
+                        title: Some(format!("title {index}")),
+                        context: user_context("Retitled"),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("update should succeed")
+                .expect("task should exist");
+        }
+
+        let revisions = store
+            .recent_revisions(number, 3)
+            .await
+            .expect("recent history should load");
+        let numbers: Vec<i64> = revisions
+            .iter()
+            .map(|revision| revision.summary.revision)
+            .collect();
+        assert_eq!(numbers, vec![5, 6, 7]);
+        assert_eq!(revisions[2].snapshot.title, "title 5");
     }
 
     #[tokio::test]

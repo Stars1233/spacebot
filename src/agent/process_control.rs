@@ -1179,6 +1179,13 @@ impl ProcessControlRegistry {
         WorkerMutationResult::Applied
     }
 
+    /// Record the OpenCode session receipt on the worker's run row.
+    ///
+    /// The `worker_runs` row is written by the worker start event, which may
+    /// not have committed yet. A missing row is retried with exponential
+    /// back-off, and the registration and state are re-checked before every
+    /// attempt so a worker that was replaced or is finishing never receives
+    /// the receipt.
     pub async fn persist_opencode_session(
         &self,
         callback: WorkerCallbackContext,
@@ -1186,24 +1193,45 @@ impl ProcessControlRegistry {
         session_id: &str,
         port: u16,
     ) -> crate::Result<WorkerMutationResult> {
-        let Some(entry) = self.worker_entry_for_callback(callback).await else {
-            return Ok(self.missing_worker_mutation_result(callback).await);
-        };
-        let live = entry.live.read().await;
-        if matches!(
-            live.state,
-            WorkerRuntimeState::Cancelling | WorkerRuntimeState::Completing
-        ) {
-            return Ok(WorkerMutationResult::InvalidState);
+        const MAX_RETRIES: u32 = 5;
+        const BASE_DELAY_MS: u64 = 50;
+
+        for attempt in 0..=MAX_RETRIES {
+            let Some(entry) = self.worker_entry_for_callback(callback).await else {
+                return Ok(self.missing_worker_mutation_result(callback).await);
+            };
+            {
+                let live = entry.live.read().await;
+                if matches!(
+                    live.state,
+                    WorkerRuntimeState::Cancelling | WorkerRuntimeState::Completing
+                ) {
+                    return Ok(WorkerMutationResult::InvalidState);
+                }
+                if run_logger
+                    .update_opencode_metadata(callback.worker_id, session_id, port)
+                    .await?
+                {
+                    return Ok(WorkerMutationResult::Applied);
+                }
+            }
+            if attempt < MAX_RETRIES {
+                let delay_ms = BASE_DELAY_MS * 2u64.pow(attempt);
+                tracing::debug!(
+                    worker_id = %callback.worker_id,
+                    attempt,
+                    delay_ms,
+                    "worker_runs row not yet inserted, retrying OpenCode session metadata"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
         }
-        if run_logger
-            .update_opencode_metadata(callback.worker_id, session_id, port)
-            .await?
-        {
-            Ok(WorkerMutationResult::Applied)
-        } else {
-            Ok(WorkerMutationResult::NotFound)
-        }
+        tracing::warn!(
+            worker_id = %callback.worker_id,
+            port,
+            "worker_runs row never appeared after {MAX_RETRIES} retries, OpenCode session metadata lost"
+        );
+        Ok(WorkerMutationResult::NotFound)
     }
 
     pub async fn claim_idle_follow_up(
@@ -2265,6 +2293,56 @@ mod tests {
             assert_eq!(cancellation, ControlActionResult::AlreadyTerminal);
             assert_eq!(lifecycle, crate::conversation::WorkerLifecycle::Succeeded);
         }
+    }
+
+    #[tokio::test]
+    async fn session_metadata_waits_for_worker_row_insert() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let logger = crate::conversation::ProcessRunLogger::new(pool.clone());
+        let registry = ProcessControlRegistry::new();
+        let worker_id = worker_id(19);
+        let admission = register_restored_worker(&registry, worker_id, "channel-a", "task-a").await;
+
+        let insert_logger = logger.clone();
+        let insert = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+            insert_logger
+                .log_worker_started(
+                    None,
+                    worker_id,
+                    "task-a",
+                    "opencode",
+                    &Arc::from("agent"),
+                    true,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+        });
+
+        assert_eq!(
+            registry
+                .persist_opencode_session(admission.callback_context(), &logger, "session-1", 4321)
+                .await
+                .unwrap(),
+            WorkerMutationResult::Applied
+        );
+        insert.await.unwrap();
+        let metadata: (Option<String>, Option<i64>) = sqlx::query_as(
+            "SELECT opencode_session_id, opencode_port FROM worker_runs WHERE id = ?",
+        )
+        .bind(worker_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(metadata, (Some("session-1".to_string()), Some(4321)));
     }
 
     #[tokio::test]

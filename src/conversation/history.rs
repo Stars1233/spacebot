@@ -1352,62 +1352,6 @@ impl ProcessRunLogger {
         .transpose()
     }
 
-    /// Record OpenCode session metadata on a worker run. Fire-and-forget.
-    ///
-    /// Stores the session ID and server port so the frontend can construct
-    /// an iframe URL to the embedded OpenCode web UI.
-    ///
-    /// The worker start event may not have been observed when this runs, so a
-    /// zero-row update is retried with a short back-off.
-    pub fn log_opencode_metadata(&self, worker_id: WorkerId, session_id: &str, port: u16) {
-        let logger = self.clone();
-        let id = worker_id.to_string();
-        let session_id = session_id.to_string();
-
-        tokio::spawn(async move {
-            const MAX_RETRIES: u32 = 5;
-            const BASE_DELAY_MS: u64 = 50;
-
-            for attempt in 0..=MAX_RETRIES {
-                match logger
-                    .update_opencode_metadata(worker_id, &session_id, port)
-                    .await
-                {
-                    Ok(true) => {
-                        return; // Successfully updated.
-                    }
-                    Ok(false) => {
-                        // Row doesn't exist yet — INSERT hasn't committed.
-                        if attempt < MAX_RETRIES {
-                            let delay = BASE_DELAY_MS * 2u64.pow(attempt);
-                            tracing::debug!(
-                                worker_id = %id,
-                                attempt,
-                                delay_ms = delay,
-                                "worker_runs row not yet inserted, retrying opencode metadata update"
-                            );
-                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-                        } else {
-                            tracing::warn!(
-                                worker_id = %id,
-                                "worker_runs row never appeared after {MAX_RETRIES} retries, \
-                                 opencode metadata (port={port}) lost"
-                            );
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            worker_id = %id,
-                            "failed to persist OpenCode metadata"
-                        );
-                        return;
-                    }
-                }
-            }
-        });
-    }
-
     /// Persist the provider session receipt for an OpenCode worker.
     ///
     /// Returns `false` when the worker row does not exist yet.

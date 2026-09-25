@@ -282,6 +282,10 @@ impl PromptEngine {
             "fragments/projects_context",
             crate::prompts::text::get("fragments/projects_context"),
         )?;
+        env.add_template(
+            "fragments/injected_task_context",
+            crate::prompts::text::get("fragments/injected_task_context"),
+        )?;
 
         // System message fragments
         env.add_template(
@@ -956,6 +960,16 @@ impl PromptEngine {
             "fragments/projects_context",
             context! {
                 projects => projects,
+            },
+        )
+    }
+
+    /// Render the task-board record injected into a task-linked worker's first message.
+    pub fn render_injected_task_context(&self, task_context: &str) -> Result<String> {
+        self.render(
+            "fragments/injected_task_context",
+            context! {
+                task_context => task_context,
             },
         )
     }
