@@ -1,5 +1,5 @@
 import {describe, expect, test} from "bun:test";
-import {reconcileWorkerSnapshot, workerLifecycleKey} from "./workerSnapshot.ts";
+import {reconcileWorkerSnapshot, resumeWorker, workerLifecycleKey} from "./workerSnapshot.ts";
 
 function reconcile(current, snapshot, requestGeneration, lifecycleGenerations) {
 	return reconcileWorkerSnapshot(
@@ -31,5 +31,36 @@ describe("worker snapshot reconciliation", () => {
 		expect(reconcile({"worker-a": replacement}, [staleWorker], 1, generations)).toEqual({
 			"worker-a": replacement,
 		});
+	});
+});
+
+describe("worker resume", () => {
+	test("returns an idle worker to running", () => {
+		const idleWorker = {
+			id: "worker-a",
+			isIdle: true,
+			runtimeState: "waiting_for_input",
+			routable: true,
+			currentTool: null,
+		};
+
+		expect(resumeWorker(idleWorker)).toEqual({
+			id: "worker-a",
+			isIdle: false,
+			runtimeState: "running",
+			routable: false,
+			currentTool: null,
+		});
+	});
+
+	test("leaves a running worker untouched", () => {
+		const runningWorker = {
+			id: "worker-a",
+			isIdle: false,
+			runtimeState: "running",
+			routable: true,
+		};
+
+		expect(resumeWorker(runningWorker)).toBe(runningWorker);
 	});
 });

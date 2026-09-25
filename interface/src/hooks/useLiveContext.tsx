@@ -14,7 +14,7 @@ import { useEventSource, type ConnectionState } from "@/hooks/useEventSource";
 import { useChannelLiveState, type ChannelLiveState, type ActiveBranch, type ActiveWorker } from "@/hooks/useChannelLiveState";
 import { useServer } from "@/hooks/useServer";
 import { NOTIFICATIONS_QUERY_KEY } from "@/hooks/useNotifications";
-import {reconcileWorkerSnapshot, workerLifecycleKey} from "@/hooks/workerSnapshot";
+import {reconcileWorkerSnapshot, resumeWorker, workerLifecycleKey} from "@/hooks/workerSnapshot";
 
 interface LiveContextValue {
 	liveStates: Record<string, ChannelLiveState>;
@@ -117,11 +117,13 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 				workers: Record<string, GlobalActiveWorker>,
 			) => Record<string, GlobalActiveWorker>,
 		) => {
-			setActiveWorkers((workers) => {
-				const next = update(workers);
-				activeWorkersRef.current = next;
-				return next;
-			});
+			// SSE events for a worker can arrive before React commits the update
+			// that registered it, so the ref is updated synchronously and serves
+			// as the source of truth for the current-worker checks.
+			const next = update(activeWorkersRef.current);
+			if (next === activeWorkersRef.current) return;
+			activeWorkersRef.current = next;
+			setActiveWorkers(next);
 		},
 		[],
 	);
@@ -326,6 +328,15 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 		[],
 	);
 
+	const resumeActiveWorker = useCallback((workerId: string, registrationId: string | null) => {
+		updateActiveWorkers((workers) => {
+			const worker = workers[workerId];
+			if (!worker || worker.registrationId !== registrationId) return workers;
+			const resumed = resumeWorker(worker);
+			return resumed === worker ? workers : {...workers, [workerId]: resumed};
+		});
+	}, [updateActiveWorkers]);
+
 	const wrappedWorkerStatus = useCallback((data: unknown) => {
 		const event = data as import("@/api/client").WorkerStatusEvent;
 		if (!workerEventIsCurrent(event)) return;
@@ -432,7 +443,7 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 				updateActiveWorkers((workers) => {
 					const worker = workers[event.process_id];
 					if (!worker || worker.registrationId !== event.worker_registration_id) return workers;
-					return {...workers, [event.process_id]: {...worker, currentTool: event.tool_name}};
+					return {...workers, [event.process_id]: {...resumeWorker(worker), currentTool: event.tool_name}};
 				});
 				bumpWorkerVersion();
 			}
@@ -526,6 +537,8 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 	const handleOpenCodePartUpdated = useCallback((data: unknown) => {
 		const event = data as OpenCodePartUpdatedEvent;
 		if (!workerEventIsCurrent(event)) return;
+		channelHandlers.opencode_part_updated(data);
+		resumeActiveWorker(event.worker_id, event.worker_registration_id);
 		setLiveOpenCodeParts((prev) => {
 			const existing = prev[event.worker_id] ?? new Map<string, OpenCodePart>();
 			const next = new Map(existing);
@@ -533,7 +546,7 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 			return { ...prev, [event.worker_id]: next };
 		});
 		bumpWorkerVersion();
-	}, [workerEventIsCurrent, bumpWorkerVersion]);
+	}, [channelHandlers, workerEventIsCurrent, resumeActiveWorker, bumpWorkerVersion]);
 
 	const handleOpenCodeSessionCreated = useCallback((data: unknown) => {
 		const event = data as import("@/api/client").OpenCodeSessionCreatedEvent;
@@ -547,6 +560,10 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 		const event = data as ProcessTextEvent;
 		if (event.process_type !== "worker" && event.process_type !== "branch") return;
 		if (event.process_type === "worker" && !workerEventIsCurrent(event)) return;
+		channelHandlers.process_text(data);
+		if (event.process_type === "worker") {
+			resumeActiveWorker(event.process_id, event.worker_registration_id);
+		}
 		setLiveTranscripts((prev) => {
 			const steps = prev[event.process_id] ?? [];
 			const step: TranscriptStep = {
@@ -556,7 +573,7 @@ export function LiveContextProvider({ children, onBootstrapped }: { children: Re
 			return { ...prev, [event.process_id]: [...steps, step] };
 		});
 		if (event.process_type === "worker") bumpWorkerVersion();
-	}, [workerEventIsCurrent, bumpWorkerVersion]);
+	}, [channelHandlers, workerEventIsCurrent, resumeActiveWorker, bumpWorkerVersion]);
 
 	const handleCortexChatMessage = useCallback((data: unknown) => {
 		// Forward cortex chat auto-triggered messages to any listening useCortexChat hooks

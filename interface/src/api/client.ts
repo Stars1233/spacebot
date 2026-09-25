@@ -913,8 +913,6 @@ export interface AutonomySection {
 	active_hours: [number, number] | null;
 	max_turns: number;
 	max_tasks_per_run: number;
-	timeout_secs: number;
-	warn_secs: number;
 	run_history_count: number;
 	claim_unowned: boolean;
 }
@@ -979,8 +977,6 @@ export interface AutonomyUpdate {
 	active_hours?: number[];
 	max_turns?: number;
 	max_tasks_per_run?: number;
-	timeout_secs?: number;
-	warn_secs?: number;
 	run_history_count?: number;
 	claim_unowned?: boolean;
 }

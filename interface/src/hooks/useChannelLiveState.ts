@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { generateId } from "@/lib/id";
-import {reconcileWorkerSnapshot, workerLifecycleKey} from "@/hooks/workerSnapshot";
+import {reconcileWorkerSnapshot, resumeWorker, workerLifecycleKey} from "@/hooks/workerSnapshot";
 import {
   api,
   type BranchCompletedEvent,
   type BranchStartedEvent,
   type ChronicleCheckpointEvent,
   type InboundMessageEvent,
+  type OpenCodePartUpdatedEvent,
   type OutboundMessageDeltaEvent,
   type OutboundMessageEvent,
+  type ProcessTextEvent,
   type ReasoningDeltaEvent,
   type TimelineItem,
   type ToolCompletedEvent,
@@ -149,6 +151,29 @@ function updateLatestWorkerTimelineItem(
   return next;
 }
 
+/**
+ * Store a worker entry that just emitted activity, returning it and its
+ * timeline item to running if it was waiting for input.
+ */
+function applyWorkerActivity(
+  state: ChannelLiveState,
+  worker: ActiveWorker,
+): ChannelLiveState {
+  const resumed = resumeWorker(worker);
+  if (resumed === state.workers[worker.id]) return state;
+  return {
+    ...state,
+    workers: { ...state.workers, [worker.id]: resumed },
+    timeline:
+      resumed === worker
+        ? state.timeline
+        : updateLatestWorkerTimelineItem(state.timeline, worker.id, (item) => ({
+            ...item,
+            status: "running",
+          })),
+  };
+}
+
 function assistantMessageItem(
   id: string,
   agentId: string,
@@ -182,26 +207,6 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
       workerLifecycleGenerationRef.current,
     );
   }, []);
-  const workerEventIsCurrent = useCallback(
-    (event: {
-      worker_id: string;
-      worker_registration_id: string;
-      channel_id?: string | null;
-    }) => {
-      if (event.channel_id) {
-        return (
-          liveStates[event.channel_id]?.workers[event.worker_id]?.registrationId ===
-          event.worker_registration_id
-        );
-      }
-      return Object.values(liveStates).some(
-        (state) =>
-          state.workers[event.worker_id]?.registrationId ===
-          event.worker_registration_id,
-      );
-    },
-    [liveStates],
-  );
 
   // Load conversation history for each channel on first appearance
   useEffect(() => {
@@ -296,9 +301,6 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
                       ...worker,
                       toolCalls: Math.max(existingWorker.toolCalls, worker.toolCalls),
                       currentTool: existingWorker.currentTool,
-                      isIdle: existingWorker.isIdle,
-                      runtimeState: existingWorker.runtimeState,
-                      routable: existingWorker.routable,
                       workerType: existingWorker.workerType,
                     }
                   : worker,
@@ -627,7 +629,6 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
   const handleWorkerStatus = useCallback(
     (data: unknown) => {
       const event = data as WorkerStatusEvent;
-      if (!workerEventIsCurrent(event)) return;
       recordWorkerLifecycle(event.worker_id);
       if (event.channel_id) {
         // Direct lookup via channel_id
@@ -683,13 +684,12 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
         });
       }
     },
-    [recordWorkerLifecycle, workerEventIsCurrent],
+    [recordWorkerLifecycle],
   );
 
   const handleWorkerIdle = useCallback(
     (data: unknown) => {
       const event = data as WorkerIdleEvent;
-      if (!workerEventIsCurrent(event)) return;
       recordWorkerLifecycle(event.worker_id);
       if (event.channel_id) {
         setLiveStates((prev) => {
@@ -747,7 +747,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
         });
       }
     },
-    [recordWorkerLifecycle, workerEventIsCurrent],
+    [recordWorkerLifecycle],
   );
 
   const handleWorkerCompleted = useCallback(
@@ -952,16 +952,10 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
               return prev;
             return {
               ...prev,
-              [channelId]: {
-                ...state,
-                workers: {
-                  ...state.workers,
-                  [event.process_id]: {
-                    ...worker,
-                    currentTool: event.tool_name,
-                  },
-                },
-              },
+              [channelId]: applyWorkerActivity(state, {
+                ...worker,
+                currentTool: event.tool_name,
+              }),
             };
           }
           if (event.process_type === "branch") {
@@ -995,16 +989,10 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
               const worker = state.workers[event.process_id];
               return {
                 ...prev,
-                [chId]: {
-                  ...state,
-                  workers: {
-                    ...state.workers,
-                    [event.process_id]: {
-                      ...worker,
-                      currentTool: event.tool_name,
-                    },
-                  },
-                },
+                [chId]: applyWorkerActivity(state, {
+                  ...worker,
+                  currentTool: event.tool_name,
+                }),
               };
             }
             if (
@@ -1158,6 +1146,48 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
     }
   }, []);
 
+  const resumeIdleWorker = useCallback(
+    (
+      channelId: string | null,
+      workerId: string,
+      registrationId: string | null,
+    ) => {
+      setLiveStates((prev) => {
+        const channelIds = channelId ? [channelId] : Object.keys(prev);
+        for (const id of channelIds) {
+          const state = prev[id];
+          const worker = state?.workers[workerId];
+          if (!worker || worker.registrationId !== registrationId) continue;
+          const next = applyWorkerActivity(state, worker);
+          return next === state ? prev : { ...prev, [id]: next };
+        }
+        return prev;
+      });
+    },
+    [],
+  );
+
+  const handleProcessText = useCallback(
+    (data: unknown) => {
+      const event = data as ProcessTextEvent;
+      if (event.process_type !== "worker") return;
+      resumeIdleWorker(
+        event.channel_id,
+        event.process_id,
+        event.worker_registration_id,
+      );
+    },
+    [resumeIdleWorker],
+  );
+
+  const handleOpenCodePartUpdated = useCallback(
+    (data: unknown) => {
+      const event = data as OpenCodePartUpdatedEvent;
+      resumeIdleWorker(null, event.worker_id, event.worker_registration_id);
+    },
+    [resumeIdleWorker],
+  );
+
   const loadOlderMessages = useCallback((channelId: string) => {
     setLiveStates((prev) => {
       const state = prev[channelId];
@@ -1230,6 +1260,8 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
     branch_completed: handleBranchCompleted,
     tool_started: handleToolStarted,
     tool_completed: handleToolCompleted,
+    process_text: handleProcessText,
+    opencode_part_updated: handleOpenCodePartUpdated,
   };
 
   return { liveStates, handlers, syncStatusSnapshot, loadOlderMessages };
