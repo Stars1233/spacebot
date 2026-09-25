@@ -45,11 +45,18 @@ Whisper takes 16 kHz mono `f32` PCM. What actually arrives is nothing like that:
 pub fn decode_to_pcm16k(bytes: &[u8], mime_type: &str, filename: &str) -> Result<Vec<f32>, AudioError>;
 ```
 
-Internally: probe by MIME with a filename-extension fallback (adapters lie about MIME often enough that the hint matters), decode, downmix to mono by averaging channels, resample to 16 kHz with `rubato` 5.
+Internally: probe with the MIME type and filename extension as hints, decode, downmix to mono by averaging channels, resample to 16 kHz with `rubato` 5. The probe reads the container header (`OggS` plus `OpusHead` for the Opus path), so a wrong hint does not fail a decodable file.
 
-Bounds are checked before any decoding work: 25 MB and 10 minutes. Anything larger returns an `AudioError` that becomes a text marker in the turn rather than a multi-minute CPU stall on a shared-cpu box.
+Adapters lie about MIME often enough that the dispatch in `download_attachments` (`src/agent/channel_attachments.rs:35`) has to agree. Today it only routes `audio/*` to transcription; anything else falls through to the metadata-only branch before the decoder is reached. A shared `is_audio_attachment(mime_type, filename)` predicate replaces the `starts_with("audio/")` checks there and in the saved-attachment branches of `src/agent/channel.rs`, accepting `audio/*` plus a supported extension (`ogg`, `oga`, `opus`, `m4a`, `mp3`, `wav`, `flac`) under a generic MIME such as `application/octet-stream` or `application/ogg`.
 
-Tests use short fixture clips — one per container — asserting sample rate, mono, and approximate duration.
+Bounds are 25 MB and `max_duration_secs` (default 10 minutes), and neither trusts the file:
+
+- **Size** is enforced during download. The audio path rejects an adapter-reported `size_bytes` or `Content-Length` over the limit before reading, and streams the body with a running byte count that aborts at the limit. Today `download_attachment_bytes` buffers the whole body.
+- **Duration** is enforced during decode. Container-reported duration only allows early rejection; the decoder counts output samples and aborts once they exceed `max_duration_secs` at 16 kHz, so a highly compressed or mislabeled file cannot expand past the limit.
+
+Either violation returns an `AudioError` that becomes a text marker in the turn rather than a multi-minute CPU stall on a shared-cpu box.
+
+Tests use short fixture clips — one per container — asserting sample rate, mono, and approximate duration. Negative fixtures cover a truncated file, a file whose header understates its duration, a long silent clip that compresses far below the byte limit, and an audio file delivered as `application/octet-stream`.
 
 ## Phase 2 — Whisper engine
 
@@ -63,19 +70,32 @@ whisper-rs = { version = "0.16", features = ["metal"] }
 whisper-rs = "0.16"
 ```
 
-**Model storage.** `{instance_dir}/whisper/ggml-{size}.bin`, fetched from Hugging Face on first use. This mirrors two patterns already in the codebase: the Chrome fetcher (`src/tools/browser.rs:2567`) and the fastembed model cache (`src/main.rs:1044`). Download to a temp file, `rename` into place atomically, and single-flight the whole thing behind a mutex — two voice notes landing in the same second must not both pull 150 MB.
+**Model storage.** `{instance_dir}/whisper/ggml-{size}-{hash12}.bin`, fetched from Hugging Face on first use. This mirrors two patterns already in the codebase: the Chrome fetcher (`src/tools/browser.rs:2567`) and the fastembed model cache (`src/main.rs:1044`). Download to a temp file, `rename` into place atomically, and single-flight the whole thing behind a mutex — two voice notes landing in the same second must not both pull 150 MB.
+
+Each model size is pinned in source to a full Hugging Face commit SHA (the URL uses `resolve/{sha}/`, never `main`) and the file's SHA-256. The temp file is hashed and compared before the rename; any failure, including a hash mismatch, deletes the temp file and never touches the cached path. The cached filename carries the first 12 hex characters of the pinned hash, so bumping a pin changes the path; the old file for that size is deleted after the new one verifies. A cached file that fails to load is treated as corrupt: it is deleted and fetched once more, and a second failure is a local-engine failure.
 
 **Lifecycle.** `WhisperEngine` holds:
 
 ```rust
 pub struct WhisperEngine {
-    context: Arc<Mutex<Option<WhisperContext>>>,
-    last_used: Arc<Mutex<Instant>>,
+    state: Arc<std::sync::Mutex<EngineState>>,
+    shutdown: Arc<AtomicBool>,
     config: VoiceConfig,
+}
+
+struct EngineState {
+    context: Option<WhisperContext>,
+    last_used: Instant,
 }
 ```
 
-Inference is CPU-bound and blocking, so `transcribe()` wraps it in `spawn_blocking`. The mutex around the context doubles as a work queue — serializing transcription is desirable, since two clips decoding at once on a 2-core box is slower than doing them in order. A background task drops the context after `unload_after_idle_secs` (default 600); the next voice note reloads it from the already-downloaded file, which is fast.
+Inference is CPU-bound and blocking, so `transcribe()` wraps it in `spawn_blocking`. The context and `last_used` share one mutex, and a transcription holds it for the whole check/use/update sequence: lock, load the context if it is `None`, run inference, set `last_used` to now, release. The lock doubles as a work queue — serializing transcription is desirable, since two clips decoding at once on a 2-core box is slower than doing them in order — and concurrent first use loads the context exactly once.
+
+A background task drops the context after `unload_after_idle_secs` (default 600). It takes the lock with `try_lock` and skips the tick when the lock is held, since a held lock means a transcription is running. Holding the lock, it unloads only if `last_used` is older than the idle window. Because both sides read and write under the same lock, the idle task cannot unload mid-inference or act on a stale timestamp. The next voice note reloads the context from the already-downloaded file, which is fast.
+
+On shutdown the engine sets `shutdown` and cancels the idle task. A `spawn_blocking` task cannot be aborted from outside, so inference passes whisper.cpp's abort callback a closure that reads `shutdown`; an in-flight transcription returns promptly with an error that becomes the failure marker. An in-progress model download is dropped and its temp file removed.
+
+Tests cover concurrent first use (one load, both transcripts returned), idle unload skipped while a transcription holds the lock, idle unload skipped after a use that refreshed `last_used`, reload after unload, and shutdown during inference returning within a bound.
 
 This idle unload isn't optional polish. `fly.toml` provisions `shared-cpu-2x` with **1 gb** of memory, and the `base` model is roughly 300 MB resident alongside LanceDB and fastembed.
 
@@ -84,7 +104,7 @@ This idle unload isn't optional polish. `fly.toml` provisions `shared-cpu-2x` wi
 - whisper.cpp's own `no_speech_thold` / `logprob_thold` segment gating
 - a small phrase blocklist applied to the final transcript, dropping it to empty when it matches
 
-Params otherwise: `n_threads = min(4, available_parallelism)`, no timestamps, language from config.
+Params otherwise: `n_threads = min(voice.threads, available_parallelism)`, no timestamps, language from config. Config load rejects `threads = 0`. Values above the machine's parallelism are clamped at runtime rather than rejected, since the same config may move between hosts.
 
 ## Phase 3 — Wire into the attachment path
 
@@ -100,7 +120,18 @@ if voice_model.is_empty() || voice_model.starts_with("local/") {
 
 The `<voice_transcript name= mime=>` wrapper is emitted identically by both paths, so nothing downstream in the prompt or the conversation history moves.
 
-Failure handling: if the local engine fails — model download blocked, codec unsupported — and a cloud route is configured, fall through to it. Otherwise emit the existing failure marker. Local failure should never be a dead end when the user has a working cloud model set up.
+Placement is unchanged from today. The cloud request already runs inline: `handle_message` and `handle_message_batch` in `src/agent/channel.rs` await `download_attachments` before `run_agent_turn`, so the channel's run loop does not process other messages or events until the transcript returns. The local path keeps that placement, with `spawn_blocking` keeping inference off the async workers. What changes is the worst case: a cloud call is one bounded HTTP request, while the local path can include a first-use model download and inference on a clip up to `max_duration_secs`. See Decision 4.
+
+Failure handling reuses the existing per-model fallback chains (`RoutingConfig::get_fallbacks`, `src/llm/routing.rs:109`, today consumed by `SpacebotModel` in `src/llm/model.rs:809`). `routing.voice` stays a single route; a cloud fallback for a local route is an explicit entry:
+
+```toml
+[defaults.routing.fallbacks]
+"local/whisper-base" = ["gemini/gemini-2.5-flash"]
+```
+
+If the local engine fails — model download blocked, codec unsupported — each non-`local/` entry in the chain is tried in order through the `input_audio` path. A size or duration bound violation does not fall back. With no chain, or when every entry fails, the existing failure marker is emitted. Nothing falls through to a cloud model the user did not name for this purpose.
+
+`SPACEBOT_VOICE_MODEL` is only read by `Config::load_from_env` (`src/config/load.rs:1023`), the env-only path used when no config file exists, where it replaces `routing.voice`. That path has no fallback table, so a local route configured through the env var has no cloud fallback.
 
 ## Phase 4 — Config and surfaces
 
@@ -110,14 +141,15 @@ Failure handling: if the local engine fails — model download blocked, codec un
 
 ```toml
 [voice]
-model = "base"                  # tiny, base, small, medium, large-v3
 language = "auto"               # or "en", "es", ...
 threads = 4
 unload_after_idle_secs = 600
 max_duration_secs = 600
 ```
 
-The `SPACEBOT_VOICE_MODEL` env override (`src/config/load.rs:1025`) already exists and keeps working — it sets the route, not the local model size.
+The model size has one source: the route. `local/whisper-small` selects `ggml-small`, which is the value the dashboard dropdown writes, so `[voice]` carries no `model` key. Config load rejects a `local/` route that does not name a supported local model (the synthetic entries below), and the same check applies to `local/` entries in fallback chains.
+
+The `SPACEBOT_VOICE_MODEL` env override (`src/config/load.rs:1023`) already exists and keeps working. It sets the route, so for a local route it also selects the model size.
 
 **Model list.** `src/api/models.rs` injects synthetic entries for `local/whisper-{tiny,base,small,medium,large-v3}` with `input_audio: true`, and `is_known_voice_transcription_model` accepts the `local/` prefix. This is what makes them selectable in the dashboard dropdown — `ConfigSectionEditor.tsx:216` filters the voice row on capability `voice_transcription` — and `spacebot model list --capability voice_transcription` picks them up with no CLI changes.
 
@@ -141,9 +173,11 @@ Voice page under `docs/content`, a README line noting transcription works with n
 
 **1. Opus decoder.** `opus-decoder` 0.1.1 is pure Rust, no unsafe, no FFI, RFC 8251 conformant, ~72k recent downloads — but it's five months old and single-author. The alternative is libopus through `audiopus_sys`, which is C but has been decoding the world's voice traffic for a decade, and we're already accepting a C++ toolchain for whisper.cpp. Recommendation: **libopus**. Opus bugs surface as subtly garbled transcripts, which is a miserable class of bug to chase in production.
 
-**2. Default model size.** `base` is the right quality floor for voice notes, at ~150 MB on disk and ~300 MB resident. Idle unload bounds steady-state memory on the 1 gb fly box, but peak still lands during transcription. If that's too tight, default `base` locally and pin `tiny` or a q5_1 quant in the fly config.
+**2. Default model size.** `base` is the right quality floor for voice notes, at ~150 MB on disk and ~300 MB resident. Idle unload bounds steady-state memory on the 1 gb fly box, but peak still lands during transcription. If that's too tight, default `base` locally and pin `routing.voice = "local/whisper-tiny"` in the fly config, or add a q5_1 quant as another supported `local/` model.
 
 **3. Default language.** `auto` is the honest default, but Whisper's language detection is unreliable on short clips and misdetection reads as a garbled transcript rather than a wrong-language one. Forcing `"en"` measurably reduces garbage for an English-speaking instance. Recommendation: default `auto`, document the tradeoff, make it a one-line config change.
+
+**4. Channel wait on local transcription.** Transcription runs inline in the channel turn today (Phase 3), which is acceptable for a single cloud request but not obviously for a first-use model download or a near-limit clip on a shared CPU. The alternative is to post a pending marker, transcribe on a background task, and retrigger the channel with the transcript, which lets the channel keep handling messages and worker events but reorders the voice note relative to messages sent after it. Keeping it inline with a tighter duration default is the smaller change; the background path is the one that satisfies the channel-never-blocks rule.
 
 ---
 

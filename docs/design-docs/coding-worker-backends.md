@@ -398,6 +398,7 @@ pub enum WorkspaceCapabilities {
 pub struct IdempotencyCapabilities {
     pub create_session: bool,
     pub submit_input: bool,
+    pub respond_to_request: bool,
     pub cancel_attempt: bool,
     pub close_session: bool,
 }
@@ -405,8 +406,10 @@ pub struct IdempotencyCapabilities {
 pub struct LivenessCapabilities {
     pub progress_evidence: Vec<ProgressEvidence>,
     pub observation_deadline: Duration,
+    pub submitting_deadline: Duration,
     pub running_deadline: Duration,
     pub waiting_deadline: Option<Duration>,
+    pub cancelling_deadline: Duration,
 }
 
 pub enum ProgressEvidence {
@@ -419,6 +422,17 @@ pub enum ProgressEvidence {
 
 Capabilities describe operations, not quality. `event_delivery: Poll` is not a
 degraded stream. It tells the supervisor how reconnect and freshness work.
+
+Every non-terminal attempt state that waits on the provider has a deadline.
+`queued` has none because it waits on Spacebot admission, not the provider.
+`submitting_deadline` bounds an in-flight create or submit request; expiry
+marks the operation `ambiguous` and hands it to reconciliation rather than
+failing the attempt. `running_deadline` and `waiting_deadline` bound the
+interval between capability-declared progress evidence, and a `None` waiting
+deadline means a human request may wait indefinitely. `cancelling_deadline` is
+the staged-termination grace period: expiry restarts a local driver or moves a
+cloud execution to `provider_unknown`, as described under Cancellation And
+Races.
 
 ## Shared Task Execution
 
@@ -630,7 +644,9 @@ pub enum WorkerCommand {
         delivery: FollowUpDelivery,
     },
     RespondToRequest {
+        attempt_id: WorkerAttemptId,
         request_id: String,
+        operation_id: String,
         response: WorkerRequestResponse,
     },
     CancelAttempt {
@@ -649,6 +665,7 @@ Drivers emit events in an authority envelope:
 pub struct WorkerBackendEventEnvelope {
     pub worker_id: WorkerId,
     pub backend_id: WorkerBackendId,
+    pub external_session_id: Option<String>,
     pub generation: u64,
     pub observation: WorkerObservation,
     pub event: WorkerBackendEvent,
@@ -690,7 +707,7 @@ pub enum WorkerBackendEvent {
 
 pub struct WorkerObservation {
     pub source: WorkerObservationSource,
-    pub provider_event_key: Option<String>,
+    pub provider_event_key: String,
     pub observed_at: String,
     pub source_metadata: serde_json::Value,
 }
@@ -702,8 +719,14 @@ pub enum WorkerObservationSource {
 }
 ```
 
-The envelope binds an event to its backend profile and driver generation.
-`WorkerObservation` records its provider event key or poll revision, observed
+The envelope binds an event to its backend profile, external session, and
+driver generation. `external_session_id` is the opaque provider session the
+driver is observing. It is `None` only on a `SessionCreated` event that binds a
+new session, which the supervisor accepts only while the worker is `starting`
+with no persisted session. Every other event must carry the persisted
+`external_session_id`, and the supervisor compares it before inserting an
+`accepted` receipt; a mismatch is recorded as `unknown_binding`.
+`WorkerObservation` records its provider event key and poll revision, observed
 time, and bounded source metadata. It answers where a status came from without
 making that source authoritative by itself. The current materialized status
 stores the observation that produced it. Transcript, request, artifact, and
@@ -942,29 +965,48 @@ affect materialized state:
 ```sql
 CREATE TABLE worker_event_receipts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    worker_id TEXT NOT NULL,
+    worker_id TEXT,
+    claimed_worker_id TEXT NOT NULL,
+    backend_id TEXT NOT NULL,
+    external_session_id TEXT,
     attempt_id TEXT,
     generation INTEGER NOT NULL,
-    provider_event_key TEXT,
+    provider_event_key TEXT NOT NULL,
     disposition TEXT NOT NULL,
     reason TEXT,
     observed_at TEXT NOT NULL,
-    FOREIGN KEY (worker_id) REFERENCES worker_runs(id) ON DELETE CASCADE
+    FOREIGN KEY (worker_id) REFERENCES worker_runs(id) ON DELETE CASCADE,
+    UNIQUE (claimed_worker_id, provider_event_key)
 );
 ```
 
 `accepted`, `duplicate`, `stale_generation`, `unknown_binding`,
 `attempt_mismatch`, and `terminal_conflict` are distinct dispositions. The
 supervisor records stale and rejected deliveries without applying their state
-change. Receipts are bounded diagnostic records, but retain the latest
-disposition for every provider event key through the worker's retention
-lifetime. This makes ignored events auditable without turning the event stream
-into an authority source.
+change. `claimed_worker_id`, `backend_id`, and `external_session_id` store the
+envelope's identifiers as delivered. `worker_id` is set only when the claimed
+worker exists, so a delivery for an unknown worker still records its
+`unknown_binding` receipt. Receipts are bounded diagnostic records. A receipt
+is upserted on `(claimed_worker_id, provider_event_key)`, which retains the
+latest disposition for every key through the worker's retention lifetime.
+Receipts without a `worker_id` have no worker lifetime and are pruned by age
+and count. This makes ignored events auditable without turning the event
+stream into an authority source.
 
-An adapter derives `provider_event_key` from a stable provider ID or stable
-semantic identity. When a provider cannot supply either, the adapter reconciles
-the latest snapshot and emits only newly derived state transitions. It does not
-replay unkeyed append-only events across generations.
+Accepting a delivery is one per-agent transaction: insert the `worker_events`
+row, apply its state change, and upsert the `accepted` receipt. The
+`UNIQUE (worker_id, provider_event_key)` constraint on `worker_events` is the
+claim. A conflict rolls back the state change and records `duplicate` instead.
+
+An adapter derives the required `provider_event_key` from a stable provider ID
+or stable semantic identity. When a provider cannot supply either, the adapter
+reconciles the latest snapshot and emits only newly derived state transitions.
+Those transitions, and every poll or reconciliation observation, use a
+semantic key; status keys include the poll revision or provider version that
+produced them. Terminal outcomes always use one key per attempt,
+`attempt/{attempt_id}/terminal`, regardless of source or provider event ID, so
+stream, poll, and reconciliation observations of the same completion collide.
+The adapter does not replay unkeyed append-only events across generations.
 
 Events are bounded semantic records: finalized assistant text, tool summaries,
 requests, artifacts, statuses, and terminal outcomes. Token deltas and raw
@@ -1089,6 +1131,13 @@ Adapters advertise structured requests only when the provider supplies a
 stable request ID and response contract. A provider status that merely says it
 needs the user maps to `waiting` with provider detail. The user responds
 through ordinary follow-up input.
+
+A request response is an operation like any other submit. The supervisor
+records its operation-ledger row, bound to the attempt and request ID, before
+`RespondToRequest` reaches the driver. When the response is lost, the driver
+retries only if `respond_to_request` is idempotent. Otherwise the operation
+stays `ambiguous` until a later observation proves the provider resolved the
+request, or an operator responds again with a new operation.
 
 `route` responds according to capabilities. For Capy it may queue, steer, or
 interrupt. For OpenCode it sends a follow-up when idle. For a provider without
