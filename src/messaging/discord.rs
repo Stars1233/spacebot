@@ -12,11 +12,11 @@ use serenity::all::{
     ButtonStyle, ChannelId, ChannelType, Command as ApplicationCommand, CommandDataOptionValue,
     CommandInteraction, CommandOptionType, Context, CreateActionRow, CreateAttachment,
     CreateButton, CreateCommand, CreateCommandOption, CreateEmbed, CreateEmbedAuthor,
-    CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage, CreateMessage,
-    CreatePoll, CreatePollAnswer, CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption,
-    CreateThread, EditInteractionResponse, EditMessage, EventHandler, GatewayIntents, GetMessages,
-    GuildId, Http, Interaction, Message, MessageId, ReactionType, Ready, ShardManager, Timestamp,
-    User, UserId,
+    CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseFollowup,
+    CreateInteractionResponseMessage, CreateMessage, CreatePoll, CreatePollAnswer,
+    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread,
+    EditInteractionResponse, EditMessage, EventHandler, GatewayIntents, GetMessages, GuildId, Http,
+    Interaction, Message, MessageId, ReactionType, Ready, ShardManager, Timestamp, User, UserId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -729,10 +729,24 @@ impl Handler {
                 && parent_channel_id.is_some_and(|parent_id| allowed_channels.contains(&parent_id));
             if !discord_channel_is_allowed(allowed_channels, command.channel_id.get(), parent_match)
             {
-                let edit = EditInteractionResponse::new()
-                    .content("this command isn't available in this channel");
-                if let Err(error) = command.edit_response(&ctx.http, edit).await {
-                    tracing::warn!(%error, command = %command.data.name, "failed to resolve denied slash command");
+                const DENIED: &str = "this command isn't available in this channel";
+                if is_control {
+                    let edit = EditInteractionResponse::new().content(DENIED);
+                    if let Err(error) = command.edit_response(&ctx.http, edit).await {
+                        tracing::warn!(%error, command = %command.data.name, "failed to resolve denied slash command");
+                    }
+                } else {
+                    // The defer is public, so it is removed and the denial is
+                    // sent privately: a filtered channel gets no visible bot message.
+                    if let Err(error) = command.delete_response(&ctx.http).await {
+                        tracing::warn!(%error, command = %command.data.name, "failed to remove denied slash command response");
+                    }
+                    let followup = CreateInteractionResponseFollowup::new()
+                        .content(DENIED)
+                        .ephemeral(true);
+                    if let Err(error) = command.create_followup(&ctx.http, followup).await {
+                        tracing::warn!(%error, command = %command.data.name, "failed to resolve denied slash command");
+                    }
                 }
                 return;
             }

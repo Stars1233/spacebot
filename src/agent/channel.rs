@@ -1440,6 +1440,12 @@ impl Channel {
         self.state.kind == ChannelKind::Cron || matches!(self.current_adapter(), Some("email"))
     }
 
+    /// Whether this channel can deliver text to a user through the reply tool
+    /// or the plaintext fallback.
+    fn allows_direct_reply(&self) -> bool {
+        self.state.kind == ChannelKind::User && !self.suppress_plaintext_fallback()
+    }
+
     async fn track_participant_from_message(&self, message: &InboundMessage) {
         if message.source == "system" {
             return;
@@ -1833,7 +1839,9 @@ impl Channel {
         let mut last_lag_warning: Option<std::time::Instant> = None;
 
         loop {
-            self.drive_autonomy_contract().await?;
+            if let Err(error) = self.drive_autonomy_contract().await {
+                tracing::error!(%error, channel_id = %self.id, "error driving autonomy contract");
+            }
 
             // Self-exiting cron channels have no further user messages
             // after the initial prompt. Once all workers/branches finish and no
@@ -2894,6 +2902,9 @@ impl Channel {
                     .delivered_flag
                     .load(std::sync::atomic::Ordering::Acquire)
                 || delivered_text.is_some();
+            let skipped = turn_result
+                .skip_flag
+                .load(std::sync::atomic::Ordering::Relaxed);
             let is_autonomy = self.state.kind == ChannelKind::Autonomy;
             if delivered && turn_result.retrigger_reply_preserved {
                 tracing::debug!(
@@ -2918,7 +2929,7 @@ impl Channel {
                     id: None,
                     content: OneOrMany::one(rig::message::AssistantContent::text(record)),
                 });
-            } else if !delivered {
+            } else if !delivered && !skipped && self.allows_direct_reply() {
                 let relay_attempt = message
                     .metadata
                     .get("retrigger_relay_attempt")
@@ -3461,8 +3472,7 @@ impl Channel {
         let delivered_flag = crate::tools::new_delivered_flag();
         // Autonomy runs never talk to users — no reply tool. Output goes to
         // task state, working memory, and autonomy_complete.
-        let allow_direct_reply =
-            self.state.kind == ChannelKind::User && !self.suppress_plaintext_fallback();
+        let allow_direct_reply = self.allows_direct_reply();
         let allow_ask = allow_direct_reply && !is_retrigger;
 
         // Set the originating channel on the delegation tool so task completion

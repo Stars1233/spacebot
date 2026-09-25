@@ -1428,9 +1428,7 @@ async fn run(
     }
 
     if agents_initialized {
-        for agent in agents.values() {
-            agent.deps.autonomy_control.activate();
-        }
+        activate_autonomy(&agents);
     }
 
     // Announce a completed self-restart back to the channel that requested it.
@@ -1968,6 +1966,7 @@ async fn run(
                                 ).await {
                                     Ok(()) => {
                                         agents_initialized = true;
+                                        activate_autonomy(&agents);
                                         // Restart file watcher with the new agent data
                                         let _old_watcher = _file_watcher.take();
                                         _file_watcher = Some(spacebot::config::spawn_file_watcher(
@@ -2144,6 +2143,15 @@ async fn wait_for_startup_warmup_tasks(
         true
     } else {
         false
+    }
+}
+
+/// Open autonomy admission for initialized agents. Supervisors skip checks
+/// until activated, so startup work such as idle-worker restoration completes
+/// before the first epoch.
+fn activate_autonomy(agents: &HashMap<spacebot::AgentId, spacebot::Agent>) {
+    for agent in agents.values() {
+        agent.deps.autonomy_control.activate();
     }
 }
 

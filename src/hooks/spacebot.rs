@@ -553,7 +553,9 @@ impl SpacebotHook {
                 .cloned()
                 .expect("chat history should always include current prompt");
 
-            if current_max_turns >= max_turns {
+            // `max_turns` bounds tool-calling rounds; one more completion is
+            // reserved for the response that follows the last round.
+            if current_max_turns > max_turns {
                 return Err(PromptError::MaxTurnsError {
                     max_turns,
                     chat_history: Box::new(chat_history),

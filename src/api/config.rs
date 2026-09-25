@@ -494,7 +494,7 @@ pub(super) async fn update_agent_config(
     State(state): State<Arc<ApiState>>,
     axum::Json(request): axum::Json<AgentConfigUpdateRequest>,
 ) -> Result<Json<AgentConfigResponse>, StatusCode> {
-    let _autonomy_guard = if request
+    let autonomy_transition = if request
         .autonomy
         .as_ref()
         .is_some_and(|autonomy| autonomy.level.is_some())
@@ -507,7 +507,8 @@ pub(super) async fn update_agent_config(
             .get(&key)
             .map(|deps| deps.autonomy_control.clone())
             .ok_or(StatusCode::NOT_FOUND)?;
-        Some(control.lock_transition().await)
+        let guard = control.lock_transition().await;
+        Some((control, guard))
     } else {
         None
     };
@@ -576,6 +577,10 @@ pub(super) async fn update_agent_config(
     .await?;
 
     tracing::info!(agent_id = %request.agent_id, "config.toml updated via API");
+
+    if let Some((control, _guard)) = &autonomy_transition {
+        control.request_check();
+    }
 
     if request.discord.is_some()
         && let Some(discord_config) = &new_config.messaging.discord

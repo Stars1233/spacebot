@@ -1826,11 +1826,15 @@ where
                 debug_assert!(changed.is_ok(), "worker task retains cancellation sender");
                 let reason = cancel_rx.borrow().clone();
                 execution_abort_handle.abort();
-                let _ = tokio::time::timeout(
+                if tokio::time::timeout(
                     std::time::Duration::from_secs(2),
                     &mut execution_handle,
                 )
-                .await;
+                .await
+                .is_err()
+                {
+                    tracing::warn!(%worker_id, "aborted worker execution task did not stop within 2s");
+                }
                 Ok(Ok(WorkerOutcome::Cancelled {
                     reason: cancellation_reason_text(reason.as_deref()),
                 }))

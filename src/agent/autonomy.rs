@@ -302,7 +302,9 @@ impl AutonomyControl {
         self.ready.load(Ordering::Acquire)
     }
 
-    fn request_shutdown(&self, preserve_idle_workers: bool) {
+    /// Signal the attached supervisor to stop. Returns `false` when no
+    /// supervisor has attached, so there is nothing to wait for.
+    fn request_shutdown(&self, preserve_idle_workers: bool) -> bool {
         self.preserve_idle_workers
             .store(preserve_idle_workers, Ordering::Release);
         let sender = self
@@ -310,13 +312,19 @@ impl AutonomyControl {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        if let Some(sender) = sender {
-            sender.send_replace(true);
+        match sender {
+            Some(sender) => {
+                sender.send_replace(true);
+                true
+            }
+            None => false,
         }
     }
 
     pub async fn shutdown_and_wait(&self) {
-        self.request_shutdown(false);
+        if !self.request_shutdown(false) {
+            return;
+        }
         while !self.stopped.load(Ordering::Acquire) {
             let notified = self.stopped_notify.notified();
             if self.stopped.load(Ordering::Acquire) {
@@ -602,7 +610,10 @@ async fn run_autonomy_supervisor(
                                     Some(&summary),
                                 )
                                 .await
-                                .unwrap_or(false)
+                                .unwrap_or_else(|error| {
+                                    tracing::warn!(%error, run_id = %handle.run_id, "failed to terminalize autonomy epoch after admission failure");
+                                    false
+                                })
                             {
                                 publish_terminal_summary(&deps, &handle.run_id, &summary);
                             }

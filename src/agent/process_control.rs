@@ -829,46 +829,60 @@ impl ProcessControlRegistry {
                 WorkerRuntimeState::Cancelling => return ControlActionResult::Cancelled,
                 WorkerRuntimeState::Completing => return ControlActionResult::AlreadyTerminal,
             };
-            if let Some(expected) = durable_lifecycle {
+            if let Some(mut expected) = durable_lifecycle {
                 let Some(run_logger) = &entry.control.process_run_logger else {
                     tracing::error!(%worker_id, "worker runtime has no durable cancellation control");
                     return ControlActionResult::Conflict;
                 };
-                match run_logger
-                    .transition_worker(
-                        worker_id,
-                        expected,
-                        crate::conversation::WorkerLifecycle::Cancelling,
-                    )
-                    .await
-                {
-                    Ok(crate::conversation::WorkerTransitionResult::Applied { .. })
-                    | Ok(crate::conversation::WorkerTransitionResult::Conflict {
-                        current: crate::conversation::WorkerLifecycle::Cancelling,
-                    }) => {}
-                    Ok(crate::conversation::WorkerTransitionResult::Conflict {
-                        current: crate::conversation::WorkerLifecycle::Completing,
-                    }) => {
-                        live.state = WorkerRuntimeState::Completing;
-                        return ControlActionResult::AlreadyTerminal;
-                    }
-                    Ok(crate::conversation::WorkerTransitionResult::Conflict { current })
-                        if current.is_terminal() =>
+                // The durable lifecycle can briefly trail the runtime state
+                // across Running <-> WaitingForInput, so a conflict on the
+                // other active state is retried once from that state.
+                let mut retried = false;
+                loop {
+                    match run_logger
+                        .transition_worker(
+                            worker_id,
+                            expected,
+                            crate::conversation::WorkerLifecycle::Cancelling,
+                        )
+                        .await
                     {
-                        live.state = WorkerRuntimeState::Completing;
-                        return ControlActionResult::AlreadyTerminal;
-                    }
-                    Ok(crate::conversation::WorkerTransitionResult::Conflict { current }) => {
-                        tracing::warn!(%worker_id, lifecycle = current.as_str(), "worker cancellation conflicted with durable lifecycle");
-                        return ControlActionResult::Conflict;
-                    }
-                    Ok(crate::conversation::WorkerTransitionResult::NotFound) => {
-                        tracing::warn!(%worker_id, "worker cancellation found no durable row");
-                        return ControlActionResult::Conflict;
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, %worker_id, "failed to claim durable worker cancellation");
-                        return ControlActionResult::Conflict;
+                        Ok(crate::conversation::WorkerTransitionResult::Applied { .. })
+                        | Ok(crate::conversation::WorkerTransitionResult::Conflict {
+                            current: crate::conversation::WorkerLifecycle::Cancelling,
+                        }) => break,
+                        Ok(crate::conversation::WorkerTransitionResult::Conflict {
+                            current: crate::conversation::WorkerLifecycle::Completing,
+                        }) => {
+                            live.state = WorkerRuntimeState::Completing;
+                            return ControlActionResult::AlreadyTerminal;
+                        }
+                        Ok(crate::conversation::WorkerTransitionResult::Conflict { current })
+                            if current.is_terminal() =>
+                        {
+                            live.state = WorkerRuntimeState::Completing;
+                            return ControlActionResult::AlreadyTerminal;
+                        }
+                        Ok(crate::conversation::WorkerTransitionResult::Conflict {
+                            current:
+                                current @ (crate::conversation::WorkerLifecycle::Running
+                                | crate::conversation::WorkerLifecycle::WaitingForInput),
+                        }) if !retried => {
+                            expected = current;
+                            retried = true;
+                        }
+                        Ok(crate::conversation::WorkerTransitionResult::Conflict { current }) => {
+                            tracing::warn!(%worker_id, lifecycle = current.as_str(), "worker cancellation conflicted with durable lifecycle");
+                            return ControlActionResult::Conflict;
+                        }
+                        Ok(crate::conversation::WorkerTransitionResult::NotFound) => {
+                            tracing::warn!(%worker_id, "worker cancellation found no durable row");
+                            return ControlActionResult::Conflict;
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, %worker_id, "failed to claim durable worker cancellation");
+                            return ControlActionResult::Conflict;
+                        }
                     }
                 }
             }
@@ -894,12 +908,18 @@ impl ProcessControlRegistry {
             .control
             .cancel_tx
             .send_replace(Some(Arc::from(reason)));
-        if tokio::time::timeout(grace, &mut terminal).await.is_err()
-            && let Some(handle) = entry.control.execution_abort_handle.lock().await.as_ref()
-        {
-            terminal.set(entry.control.terminal_notify.notified());
-            handle.abort();
-            let _ = tokio::time::timeout(grace, &mut terminal).await;
+        if tokio::time::timeout(grace, &mut terminal).await.is_err() {
+            // Clone the handle so the lock is released before waiting: the
+            // supervisor clears the handle under the same lock before it
+            // signals terminalization.
+            let abort_handle = entry.control.execution_abort_handle.lock().await.clone();
+            if let Some(abort_handle) = abort_handle {
+                terminal.set(entry.control.terminal_notify.notified());
+                abort_handle.abort();
+                if tokio::time::timeout(grace, &mut terminal).await.is_err() {
+                    tracing::warn!(%worker_id, "worker did not terminalize after its execution task was aborted");
+                }
+            }
         }
         ControlActionResult::Cancelled
     }
@@ -979,6 +999,9 @@ impl ProcessControlRegistry {
             .cloned()
             .collect::<Vec<_>>();
         for entry in entries {
+            if let Some(handle) = entry.control.execution_abort_handle.lock().await.as_ref() {
+                handle.abort();
+            }
             if let Some(handle) = entry.control.supervisor_handle.lock().await.as_ref() {
                 handle.abort();
             }
@@ -2182,6 +2205,94 @@ mod tests {
         ));
         assert!(registry.worker_snapshot(worker_id).await.is_none());
         assert!(registry.admissions.lock().await.owners.is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancellation_retries_when_durable_lifecycle_trails_runtime_state() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        let logger = crate::conversation::ProcessRunLogger::new(pool.clone());
+        let registry = ProcessControlRegistry::new();
+        let worker_id = worker_id(20);
+        logger
+            .log_worker_started(
+                None,
+                worker_id,
+                "task-a",
+                "builtin",
+                &Arc::from("agent"),
+                true,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let worker_provenance = provenance(worker_id, "channel-a", "task-a");
+        let reservation = registry
+            .reserve_worker(worker_id, &worker_provenance, 4)
+            .await
+            .unwrap();
+        let (control, _cancel_rx, _notify) = WorkerRuntimeControl::new(
+            crate::agent::worker::new_worker_transcript_snapshot(),
+            None,
+            None,
+            None,
+            Some(logger.clone()),
+        );
+        let admission = registry
+            .register_new_worker(
+                reservation,
+                worker_provenance,
+                WorkerBackend::Builtin,
+                true,
+                operation("channel-a"),
+                "starting",
+                control,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            registry
+                .update_worker_state(admission.callback_context(), WorkerRuntimeState::Running)
+                .await,
+            WorkerMutationResult::Applied
+        );
+        // The worker has persisted WaitingForInput but the runtime state has
+        // not caught up yet.
+        assert!(matches!(
+            logger
+                .transition_worker(
+                    worker_id,
+                    crate::conversation::WorkerLifecycle::Running,
+                    crate::conversation::WorkerLifecycle::WaitingForInput,
+                )
+                .await
+                .unwrap(),
+            crate::conversation::WorkerTransitionResult::Applied { .. }
+        ));
+
+        assert_eq!(
+            registry
+                .cancel_worker_runtime(
+                    worker_id,
+                    "test cancellation",
+                    std::time::Duration::from_millis(10)
+                )
+                .await,
+            ControlActionResult::Cancelled
+        );
+        let lifecycle: String =
+            sqlx::query_scalar("SELECT lifecycle FROM worker_runs WHERE id = ?")
+                .bind(worker_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(lifecycle, "cancelling");
     }
 
     #[tokio::test]
